@@ -1,0 +1,15 @@
+[package]
+name = "flatten-serde-json"
+description = "Flatten serde-json objects like elastic search"
+readme = "README.md"
+edition = "2021"
+
+[dependencies]
+serde_json = { version = "1.0.116", features = ["std"] }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
+
+[[bench]]
+name = "benchmarks"
+harness = false
