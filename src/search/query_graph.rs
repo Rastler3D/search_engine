@@ -11,10 +11,11 @@ use thiserror::Error;
 use crate::search::context::Context;
 use crate::search::fst_utils::{Complement, Intersection, StartsWith, Union};
 use crate::search::query_parser::{DerivativeTerm, OriginalTerm, Term, TermKind};
-use crate::search::split_config::SplitConfig;
-use crate::search::typo_config::TypoConfig;
 use crate::search::utils::bit_set::BitSet;
 use crate::search::utils::vec_map::VecMap;
+use crate::Result;
+use crate::update::split_config::SplitJoinConfig;
+use crate::update::typo_config::TypoConfig;
 
 static LEVDIST2: LazyLock<LevenshteinAutomatonBuilder> = LazyLock::new(|| LevenshteinAutomatonBuilder::new(2, true));
 static LEVDIST1: LazyLock<LevenshteinAutomatonBuilder> = LazyLock::new(|| LevenshteinAutomatonBuilder::new(1, true));
@@ -48,29 +49,20 @@ pub enum QueryGraphError{
 }
 
 impl QueryGraph {
-    pub fn from_query(terms: Vec<Term>, context: &impl Context) -> Result<QueryGraph, QueryGraphError>{
-        let time = Instant::now();
-        let mut graph = Self::build_flat_graph(terms);
-        //println!("{:?}", time.elapsed());
-        let time = Instant::now();
-        let mut graph = graph.ngrams(3);
-        //println!("{:?}", time.elapsed());
-        let time = Instant::now();
-        let mut graph = graph.prefixes();
-        //println!("{:?}", time.elapsed());
-        let time = Instant::now();
-        let mut graph = graph.typos(context.typo_config()?, context.exact_words());
-        //println!("{:?}", time.elapsed());
-        let time = Instant::now();
-        let mut graph = graph.synonyms(context.synonyms()?);
-        //println!("{:?}", time.elapsed());
-        let time = Instant::now();
-        graph = graph.splits(context, context.split_config()?);
-        //println!("{:?}", time.elapsed());
+    pub fn from_query(terms: Vec<Term>, context: &mut impl Context) -> Result<QueryGraph>{
+
+        let graph = Self::build_flat_graph(terms)
+            .ngrams(context)?
+            .prefixes(context)?
+            .typos(context)?
+            .synonyms(context)?
+            .splits(context)?;
         Ok(graph)
     }
 
-    fn ngrams(mut self, ngram: usize) -> QueryGraph{
+    fn ngrams(mut self, context: &mut impl Context) -> Result<QueryGraph>{
+        let ngram = context.split_join_config()?.ngram;
+
        'outer: for n in 2..=ngram{
             for idx in (self.root+1..self.end){
                 let Some(nodes) = self.nodes.get(idx..idx+n) else {
@@ -83,7 +75,7 @@ impl QueryGraph {
             }
         }
 
-        self
+        Ok(self)
     }
 
     fn make_ngram(nodes: &[GraphNode], orig_idx: usize) -> Option<GraphNode>{
@@ -131,7 +123,7 @@ impl QueryGraph {
         Some(node)
     }
 
-    fn prefixes(mut self) -> QueryGraph{
+    fn prefixes(mut self, _: &mut impl Context) -> Result<QueryGraph>{
         let mut nodes = Vec::new();
         for node in &self.nodes{
             match &node.data {
@@ -154,7 +146,7 @@ impl QueryGraph {
             self.insert_node(node)
         }
 
-        self
+        Ok(self)
     }
     fn get_first(s: &str) -> &str {
         match s.chars().next() {
@@ -163,7 +155,9 @@ impl QueryGraph {
         }
     }
 
-    pub fn typos(mut self, typo_config: TypoConfig, words: &fst::Set<Cow<[u8]>>) -> QueryGraph{
+    pub fn typos(mut self, context: &mut impl Context) -> Result<QueryGraph>{
+        let typo_config = context.typo_config()?;
+        let words = context.exact_words()?;
         let mut nodes = Vec::new();
         'node: for (idx,node) in self.nodes.iter().enumerate(){
             match &node.data {
@@ -278,10 +272,11 @@ impl QueryGraph {
             self.insert_node(node)
         }
 
-        self
+        Ok(self)
     }
 
-    fn synonyms(mut self, synonyms: &HashMap<Vec<String>, Vec<Vec<String>>>) -> QueryGraph{
+    fn synonyms(mut self, context: &mut impl Context) -> Result<QueryGraph>{
+        let synonyms = context.synonyms()?;
         let mut nodes = Vec::new();
         for (idx,node) in self.nodes.iter().enumerate(){
             match &node.data {
@@ -368,19 +363,20 @@ impl QueryGraph {
             self.insert_node(node)
         }
 
-        self
+        Ok(self)
     }
 
-    fn splits(mut self, context: &impl Context, split_config: SplitConfig) -> QueryGraph{
+    fn splits(mut self, context: &mut impl Context) -> Result<QueryGraph>{
         let mut nodes = Vec::new();
+        let split_config = context.split_join_config()?;
         for (idx,node) in self.nodes.iter().enumerate(){
             match &node.data {
                 NodeData::Term(term@Term{ term_kind: TermKind::Normal(OriginalTerm::Word(text)), .. }) => {
                     let splits = Self::split_best_frequency(
-                        |left, right| context.word_pair_frequency(left, right, 1).unwrap_or(0),
-                        split_config.take_top,
+                        |left, right| context.word_pair_frequency(left, right, 1),
+                        split_config.split_take_n,
                         &text
-                    ).collect::<Vec<_>>();
+                    )?.collect::<Vec<_>>();
 
                     if !splits.is_empty(){
                         nodes.push(GraphNode{
@@ -403,20 +399,20 @@ impl QueryGraph {
             self.insert_node(node)
         }
 
-        self
+        Ok(self)
     }
 
     fn split_best_frequency(
-        word_pair_frequency: impl Fn(&str, &str) -> u64,
+        mut word_pair_frequency: impl FnMut(&str, &str) -> Result<u64>,
         take_top: usize,
         word: &str,
-    ) -> impl Iterator<Item = (String, String)> + '_ {
+    ) -> Result<impl Iterator<Item = (String, String)> + '_> {
         let chars = word.char_indices().skip(1);
         let mut best = Vec::new();
         for (i, _) in chars {
             let (left, right) = word.split_at(i);
 
-            let pair_freq = word_pair_frequency(left, right);
+            let pair_freq = word_pair_frequency(left, right)?;
 
             if pair_freq != 0 {
                 best.push((pair_freq, left, right));
@@ -424,7 +420,7 @@ impl QueryGraph {
         }
         best.sort_unstable_by_key(|x| x.0);
 
-        best.into_iter().rev().map(|x| (x.1.to_string(), x.2.to_string())).take(take_top)
+        Ok(best.into_iter().rev().map(|x| (x.1.to_string(), x.2.to_string())).take(take_top))
     }
     fn insert_node(&mut self, node: GraphNode){
         let node_id = self.nodes.len();
@@ -473,14 +469,16 @@ impl QueryGraph {
 
 #[cfg(test)]
 pub mod tests {
+    use fst::Set;
     use crate::search::query_parser::parse_query;
     use crate::search::query_parser::tests::build_analyzer;
     use analyzer::analyzer::Analyzer;
     use rand::prelude::StdRng;
     use rand::{Rng, SeedableRng};
     use roaring::RoaringBitmap;
+    use crate::Criterion;
     use crate::search::context::{Fid, Position};
-    use crate::search::ranking::criteria::Criterion;
+    use crate::update::split_config::SplitJoinConfig;
     use super::*;
 
     #[derive(Debug)]
@@ -492,34 +490,37 @@ pub mod tests {
         all_docids: RoaringBitmap
     }
     impl Context for TestContext {
-        fn word_docids(&self, word: &str) -> heed::Result<RoaringBitmap> {
+        fn word_docids(&mut self, word: &str) -> Result<RoaringBitmap> {
             Ok(self.postings.get(word).cloned().unwrap_or(RoaringBitmap::new()))
         }
 
 
-        fn prefix_docids(&self, word: &str) -> heed::Result<RoaringBitmap> {
+        fn prefix_docids(&mut self, word: &str) -> Result<RoaringBitmap> {
             todo!()
         }
 
 
-        fn synonyms(&self) -> heed::Result<&HashMap<Vec<String>, Vec<Vec<String>>>> {
-            Ok(&self.synonyms)
+        fn synonyms(&self) -> Result<HashMap<Vec<String>, Vec<Vec<String>>>> {
+            Ok(self.synonyms.clone())
         }
 
-        fn all_docids(&self) -> heed::Result<RoaringBitmap> {
+        fn word_documents_count(&mut self, word: &str) -> Result<u64> {
+            todo!()
+        }
+
+        fn all_docids(&self) -> Result<RoaringBitmap> {
             Ok(self.all_docids.clone())
         }
 
-
-        fn ngram_config(&self) -> heed::Result<usize> {
-            Ok(3)
+        fn split_join_config(&self) -> Result<SplitJoinConfig> {
+            Ok(SplitJoinConfig{
+                split_take_n: 5,
+                ngram: 3
+            })
         }
 
-        fn split_config(&self) -> heed::Result<SplitConfig> {
-            Ok(SplitConfig{take_top: 3})
-        }
 
-        fn typo_config(&self) -> heed::Result<TypoConfig> {
+        fn typo_config(&self) -> Result<TypoConfig> {
             Ok(TypoConfig{
                 max_typos: 100,
                 word_len_two_typo: 5,
@@ -528,44 +529,107 @@ pub mod tests {
         }
 
 
-        fn exact_words(&self) -> &fst::Set<Cow<[u8]>> {
-            &self.exact_words
+        fn exact_words(&mut self) -> Result<Set<Cow<[u8]>>>{
+            Ok(self.exact_words.clone())
         }
 
         fn word_pair_frequency(
-            &self,
+            &mut self,
             left_word: &str,
             right_word: &str,
             _proximity: u8,
-        ) -> Option<u64> {
+        ) -> Result<u64> {
             match self.word_docids(&format!("{} {}", left_word, right_word)) {
-                Ok(rb) => Some(rb.len()),
-                _ => None,
+                Ok(rb) => Ok(rb.len()),
+                _ => Ok(0),
             }
         }
 
-        fn word_position_docids(&self, word: &str) -> heed::Result<Vec<((Fid, Position), RoaringBitmap)>> {
-            let res =match self.positions.get(word) {
-                Some(pos)=> Ok(pos.clone()),
-                _ => Ok(Vec::new()),
-            };
-            res
-        }
-
-        fn word_within_position_docids(&self, word: &str, position: (Fid, Position)) -> heed::Result<RoaringBitmap> {
+        fn word_position_docids(&mut self, word: &str, position: Position) -> Result<RoaringBitmap> {
+            // let res =match self.positions.get(word) {
+            //     Some(pos)=> Ok(pos.clone()),
+            //     _ => Ok(Vec::new()),
+            // };
+            // res
             todo!()
         }
 
-        fn prefix_position_docids(&self, word: &str) -> heed::Result<Vec<((Fid, Position), RoaringBitmap)>> {
+
+        fn word_positions(&mut self, word: &str) -> Result<Vec<Position>> {
             todo!()
         }
 
-        fn prefix_within_position_docids(&self, word: &str, position: (Fid, Position)) -> heed::Result<RoaringBitmap> {
+        fn prefix_position_docids(&mut self, word: &str, position: Position) -> Result<RoaringBitmap> {
             todo!()
         }
 
-        fn ranking_rules(&self) -> Vec<Criterion> {
-            vec![Criterion::Typo, Criterion::Proximity]
+        fn prefix_positions(&mut self, word: &str) -> Result<Vec<Position>> {
+            todo!()
+        }
+
+        fn word_prefix_pair_proximity_docids(&mut self, word: &str, prefix: &str, proximity: u8) -> Result<RoaringBitmap> {
+            match self.word_docids(&format!("{} {}", word, prefix)) {
+                Ok(rb) => Ok(rb),
+                _ => Ok(RoaringBitmap::new()),
+            }
+        }
+
+        fn prefix_word_pair_proximity_docids(&mut self, prefix: &str, word: &str, proximity: u8) -> Result<RoaringBitmap> {
+            match self.word_docids(&format!("{} {}", word, prefix)) {
+                Ok(rb) => Ok(rb),
+                _ => Ok(RoaringBitmap::new()),
+            }
+        }
+
+        fn word_pair_proximity_docids(&mut self, word1: &str, word2: &str, proximity: u8) -> Result<RoaringBitmap> {
+            match self.word_docids(&format!("{} {}", word1, word2)) {
+                Ok(rb) => Ok(rb),
+                _ => Ok(RoaringBitmap::new()),
+            }
+        }
+
+        fn prefix_prefix_pair_proximity_docids(&mut self, prefix1: &str, prefix2: &str, proximity: u8) -> Result<RoaringBitmap> {
+            match self.word_docids(&format!("{} {}", prefix1, prefix2)) {
+                Ok(rb) => Ok(rb),
+                _ => Ok(RoaringBitmap::new()),
+            }
+        }
+
+
+        fn ranking_rules(&self) -> Result<Vec<Criterion>> {
+            Ok(vec![Criterion::Proximity])
+        }
+
+        fn word_fid_docids(&mut self, word: &str, fid: Fid) -> Result<RoaringBitmap> {
+            todo!()
+        }
+
+        fn prefix_fid_docids(&mut self, prefix: &str, fid: Fid) -> Result<RoaringBitmap> {
+            todo!()
+        }
+
+        fn word_fids(&mut self, word: &str) -> Result<Vec<Fid>> {
+            todo!()
+        }
+
+        fn prefix_fids(&mut self, prefix: &str) -> Result<Vec<Fid>> {
+            todo!()
+        }
+
+        fn node_docids(&mut self, node_id: usize, graph: &QueryGraph) -> Result<&RoaringBitmap> {
+            todo!()
+        }
+
+        fn path_docids(&mut self, path: BitSet, graph: &QueryGraph) -> Result<&RoaringBitmap> {
+            todo!()
+        }
+
+        fn phrase_docids(&mut self, path: &[String]) -> Result<&RoaringBitmap> {
+            todo!()
+        }
+
+        fn split_docids(&mut self, path: &(String, String)) -> Result<&RoaringBitmap> {
+            todo!()
         }
     }
 
@@ -588,7 +652,7 @@ pub mod tests {
                 let mut values = Vec::with_capacity(len);
                 while values.len() != len {
                     let fid = rng.gen_range(0u16..10);
-                    let position = rng.gen_range(0u32..100);
+                    let position = rng.gen_range(0u16..100);
                     values.push(((fid,position), values.len()  as u32));
                 }
                 let mut result = Vec::new();
@@ -672,8 +736,8 @@ pub mod tests {
         let analyzer = build_analyzer();
         let stream = analyzer.analyze("Hello world HWWs Swwws");
         let parsed_query = parse_query(stream);
-        let context = TestContext::default();
-        let query_graph = QueryGraph::from_query(parsed_query, &context);
+        let mut context = TestContext::default();
+        let query_graph = QueryGraph::from_query(parsed_query, &mut context);
 
         println!("{:#?}", query_graph);
     }
@@ -683,8 +747,8 @@ pub mod tests {
         let analyzer = build_analyzer();
         let stream = analyzer.analyze("Hello world HWWs Swwws earth quickbrownfox");
         let parsed_query = parse_query(stream);
-        let context = TestContext::default();
-        let query_graph = QueryGraph::from_query(parsed_query, &context);
+        let mut context = TestContext::default();
+        let query_graph = QueryGraph::from_query(parsed_query, &mut context);
         println!("{:#?}", query_graph.unwrap());
     }
 }

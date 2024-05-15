@@ -5,8 +5,10 @@
 #![feature(get_many_mut)]
 #![feature(array_try_map)]
 #![feature(iter_collect_into)]
+#![feature(hash_extract_if)]
 #![cfg_attr(all(test, fuzzing), feature(no_coverage))]
 #![allow(clippy::type_complexity)]
+#![feature(trait_alias)]
 
 #[cfg(test)]
 #[global_allocator]
@@ -87,7 +89,6 @@ pub type SmallVec8<T> = smallvec::SmallVec<[T; 8]>;
 /// A GeoPoint is a point in cartesian plan, called xyz_point in the code. Its metadata
 /// is a tuple composed of 1. the DocumentId of the associated document and 2. the original point
 /// expressed in term of latitude and longitude.
-pub type GeoPoint = rstar::primitives::GeomWithData<[f64; 3], (DocumentId, [f64; 2])>;
 
 /// The maximum length a LMDB key can be.
 ///

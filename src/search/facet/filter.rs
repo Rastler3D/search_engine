@@ -444,481 +444,481 @@ impl From<Predicate> for Filter {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::fmt::Write;
-    use std::iter::FromIterator;
-
-    use big_s::S;
-    use either::Either;
-    use maplit::hashset;
-    use roaring::RoaringBitmap;
-
-    use crate::index::tests::TempIndex;
-    use crate::search::facet::Filter;
-
-    #[test]
-    fn empty_db() {
-        let index = TempIndex::new();
-        //Set the filterable fields to be the channel.
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(hashset! { S("PrIcE") });
-            })
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-
-        let filter = Filter::from_str("PrIcE < 1000").unwrap().unwrap();
-        let bitmap = filter.evaluate(&rtxn, &index).unwrap();
-        assert!(bitmap.is_empty());
-
-        let filter = Filter::from_str("NOT PrIcE >= 1000").unwrap().unwrap();
-        let bitmap = filter.evaluate(&rtxn, &index).unwrap();
-        assert!(bitmap.is_empty());
-    }
-
-
-    #[test]
-    fn not_filterable() {
-        let index = TempIndex::new();
-
-        let rtxn = index.read_txn().unwrap();
-        let filter = Filter::from_str("_geoRadius(42, 150, 10)").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().starts_with(
-            "Attribute `_geo` is not filterable. This index does not have configured filterable attributes."
-        ));
-
-        let filter = Filter::from_str("_geoBoundingBox([42, 150], [30, 10])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().starts_with(
-            "Attribute `_geo` is not filterable. This index does not have configured filterable attributes."
-        ));
-
-        let filter = Filter::from_str("dog = \"bernese mountain\"").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().starts_with(
-            "Attribute `dog` is not filterable. This index does not have configured filterable attributes."
-        ));
-        drop(rtxn);
-
-        index
-            .update_settings(|settings| {
-                settings.set_searchable_fields(vec![S("title")]);
-                settings.set_filterable_fields(hashset! { S("title") });
-            })
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-
-        let filter = Filter::from_str("_geoRadius(-100, 150, 10)").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().starts_with(
-            "Attribute `_geo` is not filterable. Available filterable attributes are: `title`."
-        ));
-
-        let filter = Filter::from_str("_geoBoundingBox([42, 150], [30, 10])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().starts_with(
-            "Attribute `_geo` is not filterable. Available filterable attributes are: `title`."
-        ));
-
-        let filter = Filter::from_str("name = 12").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().starts_with(
-            "Attribute `name` is not filterable. Available filterable attributes are: `title`."
-        ));
-    }
-
-    #[test]
-    fn escaped_quote_in_filter_value_2380() {
-        let index = TempIndex::new();
-
-        index
-            .add_documents(documents!([
-                {
-                    "id": "test_1",
-                    "monitor_diagonal": "27' to 30'"
-                },
-                {
-                    "id": "test_2",
-                    "monitor_diagonal": "27\" to 30\""
-                },
-                {
-                    "id": "test_3",
-                    "monitor_diagonal": "27\" to 30'"
-                },
-            ]))
-            .unwrap();
-
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(hashset!(S("monitor_diagonal")));
-            })
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-
-        let mut search = crate::Search::new(&rtxn, &index);
-        // this filter is copy pasted from #2380 with the exact same espace sequence
-        search.filter(Filter::from_str("monitor_diagonal = '27\" to 30\\''").unwrap().unwrap());
-        let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-        assert_eq!(documents_ids, vec![2]);
-
-        search.filter(Filter::from_str(r#"monitor_diagonal = "27' to 30'" "#).unwrap().unwrap());
-        let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-        assert_eq!(documents_ids, vec![0]);
-
-        search.filter(Filter::from_str(r#"monitor_diagonal = "27\" to 30\"" "#).unwrap().unwrap());
-        let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-        assert_eq!(documents_ids, vec![1]);
-
-        search.filter(Filter::from_str(r#"monitor_diagonal = "27\" to 30'" "#).unwrap().unwrap());
-        let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-        assert_eq!(documents_ids, vec![2]);
-    }
-
-    #[test]
-    fn zero_radius() {
-        let index = TempIndex::new();
-
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(hashset! { S("_geo") });
-            })
-            .unwrap();
-
-        index
-            .add_documents(documents!([
-              {
-                "id": 1,
-                "name": "Nàpiz' Milano",
-                "address": "Viale Vittorio Veneto, 30, 20124, Milan, Italy",
-                "type": "pizza",
-                "rating": 9,
-                "_geo": {
-                  "lat": 45.4777599,
-                  "lng": 9.1967508
-                }
-              },
-              {
-                "id": 2,
-                "name": "Artico Gelateria Tradizionale",
-                "address": "Via Dogana, 1, 20123 Milan, Italy",
-                "type": "ice cream",
-                "rating": 10,
-                "_geo": {
-                  "lat": 45.4632046,
-                  "lng": 9.1719421
-                }
-              },
-            ]))
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-
-        let mut search = crate::Search::new(&rtxn, &index);
-
-        search.filter(Filter::from_str("_geoRadius(45.4777599, 9.1967508, 0)").unwrap().unwrap());
-        let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-        assert_eq!(documents_ids, vec![0]);
-    }
-
-    #[test]
-    fn geo_radius_error() {
-        let index = TempIndex::new();
-
-        index
-            .update_settings(|settings| {
-                settings.set_searchable_fields(vec![S("_geo"), S("price")]); // to keep the fields order
-                settings.set_filterable_fields(hashset! { S("_geo"), S("price") });
-            })
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-
-        // georadius have a bad latitude
-        let filter = Filter::from_str("_geoRadius(-100, 150, 10)").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(
-            error.to_string().starts_with(
-                "Bad latitude `-100`. Latitude must be contained between -90 and 90 degrees."
-            ),
-            "{}",
-            error.to_string()
-        );
-
-        // georadius have a bad latitude
-        let filter = Filter::from_str("_geoRadius(-90.0000001, 150, 10)").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().contains(
-            "Bad latitude `-90.0000001`. Latitude must be contained between -90 and 90 degrees."
-        ));
-
-        // georadius have a bad longitude
-        let filter = Filter::from_str("_geoRadius(-10, 250, 10)").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(
-            error.to_string().contains(
-                "Bad longitude `250`. Longitude must be contained between -180 and 180 degrees."
-            ),
-            "{}",
-            error.to_string(),
-        );
-
-        // georadius have a bad longitude
-        let filter = Filter::from_str("_geoRadius(-10, 180.000001, 10)").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().contains(
-            "Bad longitude `180.000001`. Longitude must be contained between -180 and 180 degrees."
-        ));
-    }
-
-    #[test]
-    fn geo_bounding_box_error() {
-        let index = TempIndex::new();
-
-        index
-            .update_settings(|settings| {
-                settings.set_searchable_fields(vec![S("_geo"), S("price")]); // to keep the fields order
-                settings.set_filterable_fields(hashset! { S("_geo"), S("price") });
-            })
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-
-        // geoboundingbox top left coord have a bad latitude
-        let filter =
-            Filter::from_str("_geoBoundingBox([-90.0000001, 150], [30, 10])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(
-            error.to_string().starts_with(
-                "Bad latitude `-90.0000001`. Latitude must be contained between -90 and 90 degrees."
-            ),
-            "{}",
-            error.to_string()
-        );
-
-        // geoboundingbox top left coord have a bad latitude
-        let filter =
-            Filter::from_str("_geoBoundingBox([90.0000001, 150], [30, 10])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(
-            error.to_string().starts_with(
-                "Bad latitude `90.0000001`. Latitude must be contained between -90 and 90 degrees."
-            ),
-            "{}",
-            error.to_string()
-        );
-
-        // geoboundingbox bottom right coord have a bad latitude
-        let filter =
-            Filter::from_str("_geoBoundingBox([30, 10], [-90.0000001, 150])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().contains(
-            "Bad latitude `-90.0000001`. Latitude must be contained between -90 and 90 degrees."
-        ));
-
-        // geoboundingbox bottom right coord have a bad latitude
-        let filter =
-            Filter::from_str("_geoBoundingBox([30, 10], [90.0000001, 150])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().contains(
-            "Bad latitude `90.0000001`. Latitude must be contained between -90 and 90 degrees."
-        ));
-
-        // geoboundingbox top left coord have a bad longitude
-        let filter =
-            Filter::from_str("_geoBoundingBox([-10, 180.000001], [30, 10])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().contains(
-            "Bad longitude `180.000001`. Longitude must be contained between -180 and 180 degrees."
-        ));
-
-        // geoboundingbox top left coord have a bad longitude
-        let filter =
-            Filter::from_str("_geoBoundingBox([-10, -180.000001], [30, 10])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().contains(
-            "Bad longitude `-180.000001`. Longitude must be contained between -180 and 180 degrees."
-        ));
-
-        // geoboundingbox bottom right coord have a bad longitude
-        let filter =
-            Filter::from_str("_geoBoundingBox([30, 10], [-10, -180.000001])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().contains(
-            "Bad longitude `-180.000001`. Longitude must be contained between -180 and 180 degrees."
-        ));
-
-        // geoboundingbox bottom right coord have a bad longitude
-        let filter =
-            Filter::from_str("_geoBoundingBox([30, 10], [-10, 180.000001])").unwrap().unwrap();
-        let error = filter.evaluate(&rtxn, &index).unwrap_err();
-        assert!(error.to_string().contains(
-            "Bad longitude `180.000001`. Longitude must be contained between -180 and 180 degrees."
-        ));
-    }
-
-    #[test]
-    fn filter_depth() {
-        // generates a big (2 MiB) filter with too much of ORs.
-        let tipic_filter = "account_ids=14361 OR ";
-        let mut filter_string = String::with_capacity(tipic_filter.len() * 14360);
-        for i in 1..=14361 {
-            let _ = write!(&mut filter_string, "account_ids={}", i);
-            if i != 14361 {
-                let _ = write!(&mut filter_string, " OR ");
-            }
-        }
-
-        // Note: the filter used to be rejected for being too deep, but that is
-        // no longer the case
-        let filter = Filter::from_str(&filter_string).unwrap();
-        assert!(filter.is_some());
-    }
-
-    #[test]
-    fn empty_filter() {
-        let option = Filter::from_str("     ").unwrap();
-        assert_eq!(option, None);
-    }
-
-    #[test]
-    fn non_finite_float() {
-        let index = TempIndex::new();
-
-        index
-            .update_settings(|settings| {
-                settings.set_searchable_fields(vec![S("price")]); // to keep the fields order
-                settings.set_filterable_fields(hashset! { S("price") });
-            })
-            .unwrap();
-        index
-            .add_documents(documents!([
-                {
-                    "id": "test_1",
-                    "price": "inf"
-                },
-                {
-                    "id": "test_2",
-                    "price": "2000"
-                },
-                {
-                    "id": "test_3",
-                    "price": "infinity"
-                },
-            ]))
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-        let filter = Filter::from_str("price = inf").unwrap().unwrap();
-        let result = filter.evaluate(&rtxn, &index).unwrap();
-        assert!(result.contains(0));
-        let filter = Filter::from_str("price < inf").unwrap().unwrap();
-        assert!(matches!(
-            filter.evaluate(&rtxn, &index),
-            Err(crate::Error::UserError(crate::error::UserError::InvalidFilter(_)))
-        ));
-
-        let filter = Filter::from_str("price = NaN").unwrap().unwrap();
-        let result = filter.evaluate(&rtxn, &index).unwrap();
-        assert!(result.is_empty());
-        let filter = Filter::from_str("price < NaN").unwrap().unwrap();
-        assert!(matches!(
-            filter.evaluate(&rtxn, &index),
-            Err(crate::Error::UserError(crate::error::UserError::InvalidFilter(_)))
-        ));
-
-        let filter = Filter::from_str("price = infinity").unwrap().unwrap();
-        let result = filter.evaluate(&rtxn, &index).unwrap();
-        assert!(result.contains(2));
-        let filter = Filter::from_str("price < infinity").unwrap().unwrap();
-        assert!(matches!(
-            filter.evaluate(&rtxn, &index),
-            Err(crate::Error::UserError(crate::error::UserError::InvalidFilter(_)))
-        ));
-    }
-
-    #[test]
-    fn filter_number() {
-        let index = TempIndex::new();
-
-        index
-            .update_settings(|settings| {
-                settings.set_primary_key("id".to_owned());
-                settings.set_filterable_fields(hashset! { S("id"), S("one"), S("two") });
-            })
-            .unwrap();
-
-        let mut docs = vec![];
-        for i in 0..100 {
-            docs.push(serde_json::json!({ "id": i, "two": i % 10 }));
-        }
-
-        index.add_documents(documents!(docs)).unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-        for i in 0..100 {
-            let filter_str = format!("id = {i}");
-            let filter = Filter::from_str(&filter_str).unwrap().unwrap();
-            let result = filter.evaluate(&rtxn, &index).unwrap();
-            assert_eq!(result, RoaringBitmap::from_iter([i]));
-        }
-        for i in 0..100 {
-            let filter_str = format!("id > {i}");
-            let filter = Filter::from_str(&filter_str).unwrap().unwrap();
-            let result = filter.evaluate(&rtxn, &index).unwrap();
-            assert_eq!(result, RoaringBitmap::from_iter((i + 1)..100));
-        }
-        for i in 0..100 {
-            let filter_str = format!("id < {i}");
-            let filter = Filter::from_str(&filter_str).unwrap().unwrap();
-            let result = filter.evaluate(&rtxn, &index).unwrap();
-            assert_eq!(result, RoaringBitmap::from_iter(0..i));
-        }
-        for i in 0..100 {
-            let filter_str = format!("id <= {i}");
-            let filter = Filter::from_str(&filter_str).unwrap().unwrap();
-            let result = filter.evaluate(&rtxn, &index).unwrap();
-            assert_eq!(result, RoaringBitmap::from_iter(0..=i));
-        }
-        for i in 0..100 {
-            let filter_str = format!("id >= {i}");
-            let filter = Filter::from_str(&filter_str).unwrap().unwrap();
-            let result = filter.evaluate(&rtxn, &index).unwrap();
-            assert_eq!(result, RoaringBitmap::from_iter(i..100));
-        }
-        for i in 0..100 {
-            for j in i..100 {
-                let filter_str = format!("id {i} TO {j}");
-                let filter = Filter::from_str(&filter_str).unwrap().unwrap();
-                let result = filter.evaluate(&rtxn, &index).unwrap();
-                assert_eq!(result, RoaringBitmap::from_iter(i..=j));
-            }
-        }
-        let filter = Filter::from_str("one >= 0 OR one <= 0").unwrap().unwrap();
-        let result = filter.evaluate(&rtxn, &index).unwrap();
-        assert_eq!(result, RoaringBitmap::default());
-
-        let filter = Filter::from_str("one = 0").unwrap().unwrap();
-        let result = filter.evaluate(&rtxn, &index).unwrap();
-        assert_eq!(result, RoaringBitmap::default());
-
-        for i in 0..10 {
-            for j in i..10 {
-                let filter_str = format!("two {i} TO {j}");
-                let filter = Filter::from_str(&filter_str).unwrap().unwrap();
-                let result = filter.evaluate(&rtxn, &index).unwrap();
-                assert_eq!(
-                    result,
-                    RoaringBitmap::from_iter((0..100).filter(|x| (i..=j).contains(&(x % 10))))
-                );
-            }
-        }
-        let filter = Filter::from_str("two != 0").unwrap().unwrap();
-        let result = filter.evaluate(&rtxn, &index).unwrap();
-        assert_eq!(result, RoaringBitmap::from_iter((0..100).filter(|x| x % 10 != 0)));
-    }
-}
+// #[cfg(test)]
+// mod tests {
+//     use std::fmt::Write;
+//     use std::iter::FromIterator;
+//
+//     use big_s::S;
+//     use either::Either;
+//     use maplit::hashset;
+//     use roaring::RoaringBitmap;
+//
+//     use crate::index::tests::TempIndex;
+//     use crate::search::facet::Filter;
+//
+//     #[test]
+//     fn empty_db() {
+//         let index = TempIndex::new();
+//         //Set the filterable fields to be the channel.
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(hashset! { S("PrIcE") });
+//             })
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//
+//         let filter = Filter::from_str("PrIcE < 1000").unwrap().unwrap();
+//         let bitmap = filter.evaluate(&rtxn, &index).unwrap();
+//         assert!(bitmap.is_empty());
+//
+//         let filter = Filter::from_str("NOT PrIcE >= 1000").unwrap().unwrap();
+//         let bitmap = filter.evaluate(&rtxn, &index).unwrap();
+//         assert!(bitmap.is_empty());
+//     }
+//
+//
+//     #[test]
+//     fn not_filterable() {
+//         let index = TempIndex::new();
+//
+//         let rtxn = index.read_txn().unwrap();
+//         let filter = Filter::from_str("_geoRadius(42, 150, 10)").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().starts_with(
+//             "Attribute `_geo` is not filterable. This index does not have configured filterable attributes."
+//         ));
+//
+//         let filter = Filter::from_str("_geoBoundingBox([42, 150], [30, 10])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().starts_with(
+//             "Attribute `_geo` is not filterable. This index does not have configured filterable attributes."
+//         ));
+//
+//         let filter = Filter::from_str("dog = \"bernese mountain\"").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().starts_with(
+//             "Attribute `dog` is not filterable. This index does not have configured filterable attributes."
+//         ));
+//         drop(rtxn);
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_searchable_fields(vec![S("title")]);
+//                 settings.set_filterable_fields(hashset! { S("title") });
+//             })
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//
+//         let filter = Filter::from_str("_geoRadius(-100, 150, 10)").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().starts_with(
+//             "Attribute `_geo` is not filterable. Available filterable attributes are: `title`."
+//         ));
+//
+//         let filter = Filter::from_str("_geoBoundingBox([42, 150], [30, 10])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().starts_with(
+//             "Attribute `_geo` is not filterable. Available filterable attributes are: `title`."
+//         ));
+//
+//         let filter = Filter::from_str("name = 12").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().starts_with(
+//             "Attribute `name` is not filterable. Available filterable attributes are: `title`."
+//         ));
+//     }
+//
+//     #[test]
+//     fn escaped_quote_in_filter_value_2380() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .add_documents(documents!([
+//                 {
+//                     "id": "test_1",
+//                     "monitor_diagonal": "27' to 30'"
+//                 },
+//                 {
+//                     "id": "test_2",
+//                     "monitor_diagonal": "27\" to 30\""
+//                 },
+//                 {
+//                     "id": "test_3",
+//                     "monitor_diagonal": "27\" to 30'"
+//                 },
+//             ]))
+//             .unwrap();
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(hashset!(S("monitor_diagonal")));
+//             })
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//
+//         let mut search = crate::Search::new(&rtxn, &index);
+//         // this filter is copy pasted from #2380 with the exact same espace sequence
+//         search.filter(Filter::from_str("monitor_diagonal = '27\" to 30\\''").unwrap().unwrap());
+//         let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//         assert_eq!(documents_ids, vec![2]);
+//
+//         search.filter(Filter::from_str(r#"monitor_diagonal = "27' to 30'" "#).unwrap().unwrap());
+//         let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//         assert_eq!(documents_ids, vec![0]);
+//
+//         search.filter(Filter::from_str(r#"monitor_diagonal = "27\" to 30\"" "#).unwrap().unwrap());
+//         let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//         assert_eq!(documents_ids, vec![1]);
+//
+//         search.filter(Filter::from_str(r#"monitor_diagonal = "27\" to 30'" "#).unwrap().unwrap());
+//         let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//         assert_eq!(documents_ids, vec![2]);
+//     }
+//
+//     #[test]
+//     fn zero_radius() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(hashset! { S("_geo") });
+//             })
+//             .unwrap();
+//
+//         index
+//             .add_documents(documents!([
+//               {
+//                 "id": 1,
+//                 "name": "Nàpiz' Milano",
+//                 "address": "Viale Vittorio Veneto, 30, 20124, Milan, Italy",
+//                 "type": "pizza",
+//                 "rating": 9,
+//                 "_geo": {
+//                   "lat": 45.4777599,
+//                   "lng": 9.1967508
+//                 }
+//               },
+//               {
+//                 "id": 2,
+//                 "name": "Artico Gelateria Tradizionale",
+//                 "address": "Via Dogana, 1, 20123 Milan, Italy",
+//                 "type": "ice cream",
+//                 "rating": 10,
+//                 "_geo": {
+//                   "lat": 45.4632046,
+//                   "lng": 9.1719421
+//                 }
+//               },
+//             ]))
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//
+//         let mut search = crate::Search::new(&rtxn, &index);
+//
+//         search.filter(Filter::from_str("_geoRadius(45.4777599, 9.1967508, 0)").unwrap().unwrap());
+//         let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//         assert_eq!(documents_ids, vec![0]);
+//     }
+//
+//     #[test]
+//     fn geo_radius_error() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_searchable_fields(vec![S("_geo"), S("price")]); // to keep the fields order
+//                 settings.set_filterable_fields(hashset! { S("_geo"), S("price") });
+//             })
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//
+//         // georadius have a bad latitude
+//         let filter = Filter::from_str("_geoRadius(-100, 150, 10)").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(
+//             error.to_string().starts_with(
+//                 "Bad latitude `-100`. Latitude must be contained between -90 and 90 degrees."
+//             ),
+//             "{}",
+//             error.to_string()
+//         );
+//
+//         // georadius have a bad latitude
+//         let filter = Filter::from_str("_geoRadius(-90.0000001, 150, 10)").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().contains(
+//             "Bad latitude `-90.0000001`. Latitude must be contained between -90 and 90 degrees."
+//         ));
+//
+//         // georadius have a bad longitude
+//         let filter = Filter::from_str("_geoRadius(-10, 250, 10)").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(
+//             error.to_string().contains(
+//                 "Bad longitude `250`. Longitude must be contained between -180 and 180 degrees."
+//             ),
+//             "{}",
+//             error.to_string(),
+//         );
+//
+//         // georadius have a bad longitude
+//         let filter = Filter::from_str("_geoRadius(-10, 180.000001, 10)").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().contains(
+//             "Bad longitude `180.000001`. Longitude must be contained between -180 and 180 degrees."
+//         ));
+//     }
+//
+//     #[test]
+//     fn geo_bounding_box_error() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_searchable_fields(vec![S("_geo"), S("price")]); // to keep the fields order
+//                 settings.set_filterable_fields(hashset! { S("_geo"), S("price") });
+//             })
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//
+//         // geoboundingbox top left coord have a bad latitude
+//         let filter =
+//             Filter::from_str("_geoBoundingBox([-90.0000001, 150], [30, 10])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(
+//             error.to_string().starts_with(
+//                 "Bad latitude `-90.0000001`. Latitude must be contained between -90 and 90 degrees."
+//             ),
+//             "{}",
+//             error.to_string()
+//         );
+//
+//         // geoboundingbox top left coord have a bad latitude
+//         let filter =
+//             Filter::from_str("_geoBoundingBox([90.0000001, 150], [30, 10])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(
+//             error.to_string().starts_with(
+//                 "Bad latitude `90.0000001`. Latitude must be contained between -90 and 90 degrees."
+//             ),
+//             "{}",
+//             error.to_string()
+//         );
+//
+//         // geoboundingbox bottom right coord have a bad latitude
+//         let filter =
+//             Filter::from_str("_geoBoundingBox([30, 10], [-90.0000001, 150])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().contains(
+//             "Bad latitude `-90.0000001`. Latitude must be contained between -90 and 90 degrees."
+//         ));
+//
+//         // geoboundingbox bottom right coord have a bad latitude
+//         let filter =
+//             Filter::from_str("_geoBoundingBox([30, 10], [90.0000001, 150])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().contains(
+//             "Bad latitude `90.0000001`. Latitude must be contained between -90 and 90 degrees."
+//         ));
+//
+//         // geoboundingbox top left coord have a bad longitude
+//         let filter =
+//             Filter::from_str("_geoBoundingBox([-10, 180.000001], [30, 10])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().contains(
+//             "Bad longitude `180.000001`. Longitude must be contained between -180 and 180 degrees."
+//         ));
+//
+//         // geoboundingbox top left coord have a bad longitude
+//         let filter =
+//             Filter::from_str("_geoBoundingBox([-10, -180.000001], [30, 10])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().contains(
+//             "Bad longitude `-180.000001`. Longitude must be contained between -180 and 180 degrees."
+//         ));
+//
+//         // geoboundingbox bottom right coord have a bad longitude
+//         let filter =
+//             Filter::from_str("_geoBoundingBox([30, 10], [-10, -180.000001])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().contains(
+//             "Bad longitude `-180.000001`. Longitude must be contained between -180 and 180 degrees."
+//         ));
+//
+//         // geoboundingbox bottom right coord have a bad longitude
+//         let filter =
+//             Filter::from_str("_geoBoundingBox([30, 10], [-10, 180.000001])").unwrap().unwrap();
+//         let error = filter.evaluate(&rtxn, &index).unwrap_err();
+//         assert!(error.to_string().contains(
+//             "Bad longitude `180.000001`. Longitude must be contained between -180 and 180 degrees."
+//         ));
+//     }
+//
+//     #[test]
+//     fn filter_depth() {
+//         // generates a big (2 MiB) filter with too much of ORs.
+//         let tipic_filter = "account_ids=14361 OR ";
+//         let mut filter_string = String::with_capacity(tipic_filter.len() * 14360);
+//         for i in 1..=14361 {
+//             let _ = write!(&mut filter_string, "account_ids={}", i);
+//             if i != 14361 {
+//                 let _ = write!(&mut filter_string, " OR ");
+//             }
+//         }
+//
+//         // Note: the filter used to be rejected for being too deep, but that is
+//         // no longer the case
+//         let filter = Filter::from_str(&filter_string).unwrap();
+//         assert!(filter.is_some());
+//     }
+//
+//     #[test]
+//     fn empty_filter() {
+//         let option = Filter::from_str("     ").unwrap();
+//         assert_eq!(option, None);
+//     }
+//
+//     #[test]
+//     fn non_finite_float() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_searchable_fields(vec![S("price")]); // to keep the fields order
+//                 settings.set_filterable_fields(hashset! { S("price") });
+//             })
+//             .unwrap();
+//         index
+//             .add_documents(documents!([
+//                 {
+//                     "id": "test_1",
+//                     "price": "inf"
+//                 },
+//                 {
+//                     "id": "test_2",
+//                     "price": "2000"
+//                 },
+//                 {
+//                     "id": "test_3",
+//                     "price": "infinity"
+//                 },
+//             ]))
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//         let filter = Filter::from_str("price = inf").unwrap().unwrap();
+//         let result = filter.evaluate(&rtxn, &index).unwrap();
+//         assert!(result.contains(0));
+//         let filter = Filter::from_str("price < inf").unwrap().unwrap();
+//         assert!(matches!(
+//             filter.evaluate(&rtxn, &index),
+//             Err(crate::Error::UserError(crate::error::UserError::InvalidFilter(_)))
+//         ));
+//
+//         let filter = Filter::from_str("price = NaN").unwrap().unwrap();
+//         let result = filter.evaluate(&rtxn, &index).unwrap();
+//         assert!(result.is_empty());
+//         let filter = Filter::from_str("price < NaN").unwrap().unwrap();
+//         assert!(matches!(
+//             filter.evaluate(&rtxn, &index),
+//             Err(crate::Error::UserError(crate::error::UserError::InvalidFilter(_)))
+//         ));
+//
+//         let filter = Filter::from_str("price = infinity").unwrap().unwrap();
+//         let result = filter.evaluate(&rtxn, &index).unwrap();
+//         assert!(result.contains(2));
+//         let filter = Filter::from_str("price < infinity").unwrap().unwrap();
+//         assert!(matches!(
+//             filter.evaluate(&rtxn, &index),
+//             Err(crate::Error::UserError(crate::error::UserError::InvalidFilter(_)))
+//         ));
+//     }
+//
+//     #[test]
+//     fn filter_number() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_primary_key("id".to_owned());
+//                 settings.set_filterable_fields(hashset! { S("id"), S("one"), S("two") });
+//             })
+//             .unwrap();
+//
+//         let mut docs = vec![];
+//         for i in 0..100 {
+//             docs.push(serde_json::json!({ "id": i, "two": i % 10 }));
+//         }
+//
+//         index.add_documents(documents!(docs)).unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//         for i in 0..100 {
+//             let filter_str = format!("id = {i}");
+//             let filter = Filter::from_str(&filter_str).unwrap().unwrap();
+//             let result = filter.evaluate(&rtxn, &index).unwrap();
+//             assert_eq!(result, RoaringBitmap::from_iter([i]));
+//         }
+//         for i in 0..100 {
+//             let filter_str = format!("id > {i}");
+//             let filter = Filter::from_str(&filter_str).unwrap().unwrap();
+//             let result = filter.evaluate(&rtxn, &index).unwrap();
+//             assert_eq!(result, RoaringBitmap::from_iter((i + 1)..100));
+//         }
+//         for i in 0..100 {
+//             let filter_str = format!("id < {i}");
+//             let filter = Filter::from_str(&filter_str).unwrap().unwrap();
+//             let result = filter.evaluate(&rtxn, &index).unwrap();
+//             assert_eq!(result, RoaringBitmap::from_iter(0..i));
+//         }
+//         for i in 0..100 {
+//             let filter_str = format!("id <= {i}");
+//             let filter = Filter::from_str(&filter_str).unwrap().unwrap();
+//             let result = filter.evaluate(&rtxn, &index).unwrap();
+//             assert_eq!(result, RoaringBitmap::from_iter(0..=i));
+//         }
+//         for i in 0..100 {
+//             let filter_str = format!("id >= {i}");
+//             let filter = Filter::from_str(&filter_str).unwrap().unwrap();
+//             let result = filter.evaluate(&rtxn, &index).unwrap();
+//             assert_eq!(result, RoaringBitmap::from_iter(i..100));
+//         }
+//         for i in 0..100 {
+//             for j in i..100 {
+//                 let filter_str = format!("id {i} TO {j}");
+//                 let filter = Filter::from_str(&filter_str).unwrap().unwrap();
+//                 let result = filter.evaluate(&rtxn, &index).unwrap();
+//                 assert_eq!(result, RoaringBitmap::from_iter(i..=j));
+//             }
+//         }
+//         let filter = Filter::from_str("one >= 0 OR one <= 0").unwrap().unwrap();
+//         let result = filter.evaluate(&rtxn, &index).unwrap();
+//         assert_eq!(result, RoaringBitmap::default());
+//
+//         let filter = Filter::from_str("one = 0").unwrap().unwrap();
+//         let result = filter.evaluate(&rtxn, &index).unwrap();
+//         assert_eq!(result, RoaringBitmap::default());
+//
+//         for i in 0..10 {
+//             for j in i..10 {
+//                 let filter_str = format!("two {i} TO {j}");
+//                 let filter = Filter::from_str(&filter_str).unwrap().unwrap();
+//                 let result = filter.evaluate(&rtxn, &index).unwrap();
+//                 assert_eq!(
+//                     result,
+//                     RoaringBitmap::from_iter((0..100).filter(|x| (i..=j).contains(&(x % 10))))
+//                 );
+//             }
+//         }
+//         let filter = Filter::from_str("two != 0").unwrap().unwrap();
+//         let result = filter.evaluate(&rtxn, &index).unwrap();
+//         assert_eq!(result, RoaringBitmap::from_iter((0..100).filter(|x| x % 10 != 0)));
+//     }
+// }

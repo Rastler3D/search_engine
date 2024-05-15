@@ -222,6 +222,13 @@ impl BitSet<[u64;2]> {
         self
     }
 
+    #[inline]
+    pub fn difference(&mut self, other: &Self) -> &mut Self{
+        self.inner.bit_andnot(&other.inner);
+        self.len = self.inner.bit_count();
+        self
+    }
+
 }
 
 impl Debug for BitSet<Vec<u64>>{

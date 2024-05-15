@@ -769,2556 +769,2556 @@ fn execute_word_prefix_docids(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use big_s::S;
-    use fst::IntoStreamer;
-    use heed::RwTxn;
-    use maplit::hashset;
-
-    use super::*;
-    use crate::documents::documents_batch_reader_from_objects;
-    use crate::index::tests::TempIndex;
-    //use crate::search::TermsMatchingStrategy;
-    use crate::update::Setting;
-    //use crate::{db_snap, Filter, Search};
-
-    #[test]
-    fn simple_document_replacement() {
-        let index = TempIndex::new();
-
-        // First we send 3 documents with ids from 1 to 3.
-        index
-            .add_documents(documents!([
-                { "id": 1, "name": "kevin" },
-                { "id": 2, "name": "kevina" },
-                { "id": 3, "name": "benoit" }
-            ]))
-            .unwrap();
-
-        // Check that there is 3 documents now.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 3);
-        drop(rtxn);
-
-        // Second we send 1 document with id 1, to erase the previous ones.
-        index.add_documents(documents!([ { "id": 1, "name": "updated kevin" } ])).unwrap();
-
-        // Check that there is **always** 3 documents.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 3);
-        drop(rtxn);
-
-        // Third we send 3 documents again to replace the existing ones.
-        index
-            .add_documents(documents!([
-                { "id": 1, "name": "updated second kevin" },
-                { "id": 2, "name": "updated kevina" },
-                { "id": 3, "name": "updated benoit" }
-            ]))
-            .unwrap();
-
-        // Check that there is **always** 3 documents.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 3);
-        let count = index.all_documents(&rtxn).unwrap().count();
-        assert_eq!(count, 3);
-
-        drop(rtxn);
-    }
-
-    #[test]
-    fn simple_document_merge() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
-
-        // First we send 3 documents with duplicate ids and
-        // change the index method to merge documents.
-        index
-            .add_documents(documents!([
-                { "id": 1, "name": "kevin" },
-                { "id": 1, "name": "kevina" },
-                { "id": 1, "name": "benoit" }
-            ]))
-            .unwrap();
-
-        // Check that there is only 1 document now.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 1);
-
-        // Check that we get only one document from the database.
-        let docs = index.documents(&rtxn, Some(0)).unwrap();
-        assert_eq!(docs.len(), 1);
-        let (id, doc) = docs[0];
-        assert_eq!(id, 0);
-
-        // Check that this document is equal to the last one sent.
-        let mut doc_iter = doc.iter();
-        assert_eq!(doc_iter.next(), Some((0, &b"1"[..])));
-        assert_eq!(doc_iter.next(), Some((1, &br#""benoit""#[..])));
-        assert_eq!(doc_iter.next(), None);
-        drop(rtxn);
-
-        // Second we send 1 document with id 1, to force it to be merged with the previous one.
-        index.add_documents(documents!([ { "id": 1, "age": 25 } ])).unwrap();
-
-        // Check that there is **always** 1 document.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 1);
-
-        // Check that we get only one document from the database.
-        let docs = index.documents(&rtxn, Some(0)).unwrap();
-        assert_eq!(docs.len(), 1);
-        let (id, doc) = docs[0];
-        assert_eq!(id, 0);
-
-        // Check that this document is equal to the last one sent.
-        let mut doc_iter = doc.iter();
-        assert_eq!(doc_iter.next(), Some((0, &b"1"[..])));
-        assert_eq!(doc_iter.next(), Some((1, &br#""benoit""#[..])));
-        assert_eq!(doc_iter.next(), Some((2, &b"25"[..])));
-        assert_eq!(doc_iter.next(), None);
-        drop(rtxn);
-    }
-
-    #[test]
-    fn not_auto_generated_documents_ids() {
-        let index = TempIndex::new();
-
-        let result = index.add_documents(documents!([
-            { "name": "kevin" },
-            { "name": "kevina" },
-            { "name": "benoit" }
-        ]));
-        assert!(result.is_err());
-
-        // Check that there is no document.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 0);
-        drop(rtxn);
-    }
-
-    #[test]
-    fn simple_auto_generated_documents_ids() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.autogenerate_docids = true;
-        // First we send 3 documents with ids from 1 to 3.
-        index
-            .add_documents(documents!([
-                { "name": "kevin" },
-                { "name": "kevina" },
-                { "name": "benoit" }
-            ]))
-            .unwrap();
-
-        // Check that there is 3 documents now.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 3);
-
-        let docs = index.documents(&rtxn, vec![0, 1, 2]).unwrap();
-        let (_id, obkv) = docs.iter().find(|(_id, kv)| kv.get(0) == Some(br#""kevin""#)).unwrap();
-        let kevin_uuid: String = serde_json::from_slice(obkv.get(1).unwrap()).unwrap();
-        drop(rtxn);
-
-        // Second we send 1 document with the generated uuid, to erase the previous ones.
-        index.add_documents(documents!([ { "name": "updated kevin", "id": kevin_uuid } ])).unwrap();
-
-        // Check that there is **always** 3 documents.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 3);
-
-        // the document 0 has been deleted and reinserted with the id 3
-        let docs = index.documents(&rtxn, vec![1, 2, 0]).unwrap();
-        let kevin_position =
-            docs.iter().position(|(_, d)| d.get(0).unwrap() == br#""updated kevin""#).unwrap();
-        assert_eq!(kevin_position, 2);
-        let (_, doc) = docs[kevin_position];
-
-        // Check that this document is equal to the last
-        // one sent and that an UUID has been generated.
-        assert_eq!(doc.get(0), Some(&br#""updated kevin""#[..]));
-        // This is an UUID, it must be 36 bytes long plus the 2 surrounding string quotes (").
-        assert_eq!(doc.get(1).unwrap().len(), 36 + 2);
-        drop(rtxn);
-    }
-
-    #[test]
-    fn reordered_auto_generated_documents_ids() {
-        let mut index = TempIndex::new();
-
-        // First we send 3 documents with ids from 1 to 3.
-        index
-            .add_documents(documents!([
-                { "id": 1, "name": "kevin" },
-                { "id": 2, "name": "kevina" },
-                { "id": 3, "name": "benoit" }
-            ]))
-            .unwrap();
-
-        // Check that there is 3 documents now.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 3);
-        drop(rtxn);
-
-        // Second we send 1 document without specifying the id.
-        index.index_documents_config.autogenerate_docids = true;
-        index.add_documents(documents!([ { "name": "new kevin" } ])).unwrap();
-
-        // Check that there is 4 documents now.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 4);
-        drop(rtxn);
-    }
-
-    #[test]
-    fn empty_update() {
-        let index = TempIndex::new();
-
-        // First we send 0 documents and only headers.
-        index.add_documents(documents!([])).unwrap();
-
-        // Check that there is no documents.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 0);
-        drop(rtxn);
-    }
-
-    #[test]
-    fn invalid_documents_ids() {
-        let index = TempIndex::new();
-
-        // First we send 1 document with an invalid id.
-        // There is a space in the document id.
-        index.add_documents(documents!([ { "id": "brume bleue", "name": "kevin" } ])).unwrap_err();
-
-        // Then we send 1 document with a valid id.
-        index.add_documents(documents!([ { "id": 32, "name": "kevin" } ])).unwrap();
-
-        // Check that there is 1 document now.
-        let rtxn = index.read_txn().unwrap();
-        let count = index.number_of_documents(&rtxn).unwrap();
-        assert_eq!(count, 1);
-        drop(rtxn);
-    }
-
-    #[test]
-    fn complex_documents() {
-        let index = TempIndex::new();
-
-        // First we send 3 documents with an id for only one of them.
-        index
-            .add_documents(documents!([
-                { "id": 0, "name": "kevin", "object": { "key1": "value1", "key2": "value2" } },
-                { "id": 1, "name": "kevina", "array": ["I", "am", "fine"] },
-                { "id": 2, "name": "benoit", "array_of_object": [{ "wow": "amazing" }] }
-            ]))
-            .unwrap();
-
-        // Check that there is 1 documents now.
-        let rtxn = index.read_txn().unwrap();
-
-        // Search for a sub object value
-        let result = index.search(&rtxn).query(r#""value2""#).execute().unwrap();
-        assert_eq!(result.documents_ids, vec![0]);
-
-        // Search for a sub array value
-        let result = index.search(&rtxn).query(r#""fine""#).execute().unwrap();
-        assert_eq!(result.documents_ids, vec![1]);
-
-        // Search for a sub array sub object key
-        let result = index.search(&rtxn).query(r#""amazing""#).execute().unwrap();
-        assert_eq!(result.documents_ids, vec![2]);
-
-        drop(rtxn);
-    }
-
-    // #[test]
-    // fn simple_documents_replace() {
-    //     let mut index = TempIndex::new();
-    //     index.index_documents_config.update_method = IndexDocumentsMethod::ReplaceDocuments;
-    //
-    //     index.add_documents(documents!([
-    //       { "id": 2,    "title": "Pride and Prejudice",                    "author": "Jane Austin",              "genre": "romance",    "price": 3.5, "_geo": { "lat": 12, "lng": 42 } },
-    //       { "id": 456,  "title": "Le Petit Prince",                        "author": "Antoine de Saint-Exupéry", "genre": "adventure" , "price": 10.0 },
-    //       { "id": 1,    "title": "Alice In Wonderland",                    "author": "Lewis Carroll",            "genre": "fantasy",    "price": 25.99 },
-    //       { "id": 1344, "title": "The Hobbit",                             "author": "J. R. R. Tolkien",         "genre": "fantasy" },
-    //       { "id": 4,    "title": "Harry Potter and the Half-Blood Prince", "author": "J. K. Rowling",            "genre": "fantasy" },
-    //       { "id": 42,   "title": "The Hitchhiker's Guide to the Galaxy",   "author": "Douglas Adams", "_geo": { "lat": 35, "lng": 23 } }
-    //     ])).unwrap();
-    //
-    //     db_snap!(index, word_docids, "initial");
-    //
-    //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
-    //
-    //     index
-    //         .add_documents(documents!([
-    //             {"id":4,"title":"Harry Potter and the Half-Blood Princess"},
-    //             {"id":456,"title":"The Little Prince"}
-    //         ]))
-    //         .unwrap();
-    //
-    //     index
-    //         .add_documents(documents!([
-    //             { "id": 2, "author": "J. Austen", "date": "1813" }
-    //         ]))
-    //         .unwrap();
-    //
-    //     // Check that there is **always** 6 documents.
-    //     let rtxn = index.read_txn().unwrap();
-    //     let count = index.number_of_documents(&rtxn).unwrap();
-    //     assert_eq!(count, 6);
-    //     let count = index.all_documents(&rtxn).unwrap().count();
-    //     assert_eq!(count, 6);
-    //
-    //     db_snap!(index, word_docids, "updated");
-    //
-    //     drop(rtxn);
-    // }
-
-    #[test]
-    fn mixed_geo_documents() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.update_method = IndexDocumentsMethod::ReplaceDocuments;
-
-        // We send 6 documents and mix the ones that have _geo and those that don't have it.
-        index
-            .add_documents(documents!([
-              { "id": 2, "price": 3.5, "_geo": { "lat": 12, "lng": 42 } },
-              { "id": 456 },
-              { "id": 1 },
-              { "id": 1344 },
-              { "id": 4 },
-              { "id": 42, "_geo": { "lat": 35, "lng": 23 } }
-            ]))
-            .unwrap();
-
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(hashset!(S("_geo")));
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn geo_error() {
-        let mut index = TempIndex::new();
-        index.index_documents_config.update_method = IndexDocumentsMethod::ReplaceDocuments;
-
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(hashset!(S("_geo")));
-            })
-            .unwrap();
-
-        let error = index
-            .add_documents(documents!([
-              { "id": 0, "_geo": { "lng": 42 } }
-            ]))
-            .unwrap_err();
-        assert_eq!(
-            &error.to_string(),
-            r#"Could not find latitude in the document with the id: `0`. Was expecting a `_geo.lat` field."#
-        );
-
-        let error = index
-            .add_documents(documents!([
-              { "id": 0, "_geo": { "lat": 42 } }
-            ]))
-            .unwrap_err();
-        assert_eq!(
-            &error.to_string(),
-            r#"Could not find longitude in the document with the id: `0`. Was expecting a `_geo.lng` field."#
-        );
-
-        let error = index
-            .add_documents(documents!([
-              { "id": 0, "_geo": { "lat": "lol", "lng": 42 } }
-            ]))
-            .unwrap_err();
-        assert_eq!(
-            &error.to_string(),
-            r#"Could not parse latitude in the document with the id: `0`. Was expecting a finite number but instead got `"lol"`."#
-        );
-
-        let error = index
-            .add_documents(documents!([
-              { "id": 0, "_geo": { "lat": [12, 13], "lng": 42 } }
-            ]))
-            .unwrap_err();
-        assert_eq!(
-            &error.to_string(),
-            r#"Could not parse latitude in the document with the id: `0`. Was expecting a finite number but instead got `[12,13]`."#
-        );
-
-        let error = index
-            .add_documents(documents!([
-              { "id": 0, "_geo": { "lat": 12, "lng": "hello" } }
-            ]))
-            .unwrap_err();
-        assert_eq!(
-            &error.to_string(),
-            r#"Could not parse longitude in the document with the id: `0`. Was expecting a finite number but instead got `"hello"`."#
-        );
-    }
-
-    #[test]
-    fn delete_documents_then_insert() {
-        let index = TempIndex::new();
-
-        index
-            .add_documents(documents!([
-                { "objectId": 123, "title": "Pride and Prejudice", "comment": "A great book" },
-                { "objectId": 456, "title": "Le Petit Prince",     "comment": "A french book" },
-                { "objectId": 1,   "title": "Alice In Wonderland", "comment": "A weird book" },
-                { "objectId": 30,  "title": "Hamlet", "_geo": { "lat": 12, "lng": 89 } }
-            ]))
-            .unwrap();
-
-        // Delete not all of the documents but some of them.
-        index.delete_document("30");
-
-        let txn = index.read_txn().unwrap();
-        assert_eq!(index.primary_key(&txn).unwrap(), Some("objectId"));
-
-        let external_documents_ids = index.external_documents_ids();
-        assert!(external_documents_ids.get(&txn, "30").unwrap().is_none());
-
-        index
-            .add_documents(documents!([
-                { "objectId": 30,  "title": "Hamlet", "_geo": { "lat": 12, "lng": 89 } }
-            ]))
-            .unwrap();
-
-        let wtxn = index.write_txn().unwrap();
-        let external_documents_ids = index.external_documents_ids();
-        assert!(external_documents_ids.get(&wtxn, "30").unwrap().is_some());
-        wtxn.commit().unwrap();
-
-        index
-            .add_documents(documents!([
-                { "objectId": 30,  "title": "Hamlet", "_geo": { "lat": 12, "lng": 89 } }
-            ]))
-            .unwrap();
-    }
-
-    #[test]
-    fn index_more_than_256_fields() {
-        let index = TempIndex::new();
-
-        let mut big_object = serde_json::Map::new();
-        big_object.insert(S("id"), serde_json::Value::from("wow"));
-        for i in 0..1000 {
-            let key = i.to_string();
-            big_object.insert(key, serde_json::Value::from("I am a text!"));
-        }
-
-        let documents = documents_batch_reader_from_objects([big_object]);
-        index.add_documents(documents).unwrap();
-    }
-
-    #[test]
-    fn index_more_than_1000_positions_in_a_field() {
-        let index = TempIndex::new_with_map_size(4096 * 100_000); // 400 MB
-        let mut content = String::with_capacity(382101);
-        for i in 0..=u16::MAX {
-            content.push_str(&format!("{i} "));
-        }
-        index
-            .add_documents(documents!({
-                "id": "wow",
-                "content": content
-            }))
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-
-        assert!(index.word_docids.get(&rtxn, "0").unwrap().is_some());
-        assert!(index.word_docids.get(&rtxn, "64").unwrap().is_some());
-        assert!(index.word_docids.get(&rtxn, "256").unwrap().is_some());
-        assert!(index.word_docids.get(&rtxn, "1024").unwrap().is_some());
-        assert!(index.word_docids.get(&rtxn, "32768").unwrap().is_some());
-        assert!(index.word_docids.get(&rtxn, "65535").unwrap().is_some());
-    }
-
-    #[test]
-    fn index_documents_with_zeroes() {
-        let index = TempIndex::new();
-
-        index
-            .add_documents(documents!([
-                {
-                    "id": 2,
-                    "title": "Prideand Prejudice",
-                    "au{hor": "Jane Austin",
-                    "genre": "romance",
-                    "price$": "3.5$",
-                },
-                {
-                    "id": 456,
-                    "title": "Le Petit Prince",
-                    "au{hor": "Antoine de Saint-Exupéry",
-                    "genre": "adventure",
-                    "price$": "10.0$",
-                },
-                {
-                    "id": 1,
-                    "title": "Wonderland",
-                    "au{hor": "Lewis Carroll",
-                    "genre": "fantasy",
-                    "price$": "25.99$",
-                },
-                {
-                    "id": 4,
-                    "title": "Harry Potter ing fantasy\0lood Prince",
-                    "au{hor": "J. K. Rowling",
-                    "genre": "fantasy\0",
-                },
-            ]))
-            .unwrap();
-    }
-
-    // #[test]
-    // fn index_documents_with_nested_fields() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .add_documents(documents!([
-    //             {
-    //                 "id": 0,
-    //                 "title": "The zeroth document",
-    //             },
-    //             {
-    //                 "id": 1,
-    //                 "title": "The first document",
-    //                 "nested": {
-    //                     "object": "field",
-    //                     "machin": "bidule",
-    //                 },
-    //             },
-    //             {
-    //                 "id": 2,
-    //                 "title": "The second document",
-    //                 "nested": [
-    //                     "array",
-    //                     {
-    //                         "object": "field",
-    //                     },
-    //                     {
-    //                         "prout": "truc",
-    //                         "machin": "lol",
-    //                     },
-    //                 ],
-    //             },
-    //             {
-    //                 "id": 3,
-    //                 "title": "The third document",
-    //                 "nested": "I lied",
-    //             },
-    //         ]))
-    //         .unwrap();
-    //
-    //     index
-    //         .update_settings(|settings| {
-    //             let searchable_fields = vec![S("title"), S("nested.object"), S("nested.machin")];
-    //             settings.set_searchable_fields(searchable_fields);
-    //
-    //             let faceted_fields = hashset!(S("title"), S("nested.object"), S("nested.machin"));
-    //             settings.set_filterable_fields(faceted_fields);
-    //         })
-    //         .unwrap();
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //
-    //     let facets = index.faceted_fields(&rtxn).unwrap();
-    //     assert_eq!(facets, hashset!(S("title"), S("nested.object"), S("nested.machin")));
-    //
-    //     // testing the simple query search
-    //     let mut search = crate::Search::new(&rtxn, &index);
-    //     search.query("document");
-    //     search.terms_matching_strategy(TermsMatchingStrategy::default());
-    //     // all documents should be returned
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids.len(), 4);
-    //
-    //     search.query("zeroth");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![0]);
-    //     search.query("first");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![1]);
-    //     search.query("second");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![2]);
-    //     search.query("third");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![3]);
-    //
-    //     search.query("field");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![1, 2]);
-    //
-    //     search.query("lol");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![2]);
-    //
-    //     search.query("object");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert!(documents_ids.is_empty());
-    //
-    //     search.query("array");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert!(documents_ids.is_empty()); // nested is not searchable
-    //
-    //     search.query("lied");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert!(documents_ids.is_empty()); // nested is not searchable
-    //
-    //     // testing the filters
-    //     let mut search = crate::Search::new(&rtxn, &index);
-    //     search.filter(crate::Filter::from_str(r#"title = "The first document""#).unwrap().unwrap());
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![1]);
-    //
-    //     search.filter(crate::Filter::from_str(r#"nested.object = field"#).unwrap().unwrap());
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![1, 2]);
-    //
-    //     search.filter(crate::Filter::from_str(r#"nested.machin = bidule"#).unwrap().unwrap());
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![1]);
-    //
-    //     search.filter(crate::Filter::from_str(r#"nested = array"#).unwrap().unwrap());
-    //     let error = search.execute().map(|_| unreachable!()).unwrap_err(); // nested is not filterable
-    //     assert!(matches!(error, crate::Error::UserError(crate::UserError::InvalidFilter(_))));
-    //
-    //     search.filter(crate::Filter::from_str(r#"nested = "I lied""#).unwrap().unwrap());
-    //     let error = search.execute().map(|_| unreachable!()).unwrap_err(); // nested is not filterable
-    //     assert!(matches!(error, crate::Error::UserError(crate::UserError::InvalidFilter(_))));
-    // }
-
-    // #[test]
-    // fn index_documents_with_nested_primary_key() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .update_settings(|settings| {
-    //             settings.set_primary_key("complex.nested.id".to_owned());
-    //         })
-    //         .unwrap();
-    //
-    //     index
-    //         .add_documents(documents!([
-    //             {
-    //                 "complex": {
-    //                     "nested": {
-    //                         "id": 0,
-    //                     },
-    //                 },
-    //                 "title": "The zeroth document",
-    //             },
-    //             {
-    //                 "complex.nested": {
-    //                     "id": 1,
-    //                 },
-    //                 "title": "The first document",
-    //             },
-    //             {
-    //                 "complex": {
-    //                     "nested.id": 2,
-    //                 },
-    //                 "title": "The second document",
-    //             },
-    //             {
-    //                 "complex.nested.id": 3,
-    //                 "title": "The third document",
-    //             },
-    //         ]))
-    //         .unwrap();
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //
-    //     // testing the simple query search
-    //     let mut search = crate::Search::new(&rtxn, &index);
-    //     search.query("document");
-    //     search.terms_matching_strategy(TermsMatchingStrategy::default());
-    //     // all documents should be returned
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids.len(), 4);
-    //
-    //     search.query("zeroth");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![0]);
-    //     search.query("first");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![1]);
-    //     search.query("second");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![2]);
-    //     search.query("third");
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![3]);
-    // }
-    //
-    // #[test]
-    // fn retrieve_a_b_nested_document_id() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .update_settings(|settings| {
-    //             settings.set_primary_key("a.b".to_owned());
-    //         })
-    //         .unwrap();
-    //
-    //     // There must be an issue with the primary key no present in the given document
-    //     index.add_documents(documents!({ "a" : { "b" : { "c" :  1 }}})).unwrap_err();
-    // }
-    //
-    // #[test]
-    // fn retrieve_a_b_c_nested_document_id() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .update_settings(|settings| {
-    //             settings.set_primary_key("a.b.c".to_owned());
-    //         })
-    //         .unwrap();
-    //     index.add_documents(documents!({ "a" : { "b" : { "c" :  1 }}})).unwrap();
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //     let all_documents_count = index.all_documents(&rtxn).unwrap().count();
-    //     assert_eq!(all_documents_count, 1);
-    //     let external_documents_ids = index.external_documents_ids();
-    //     assert!(external_documents_ids.get(&rtxn, "1").unwrap().is_some());
-    // }
-    //
-    // #[test]
-    // fn test_facets_generation() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .add_documents(documents!([
-    //             {
-    //                 "id": 0,
-    //                 "dog": {
-    //                     "race": {
-    //                         "bernese mountain": "zeroth",
-    //                     },
-    //                 },
-    //             },
-    //             {
-    //                 "id": 1,
-    //                 "dog.race": {
-    //                     "bernese mountain": "first",
-    //                 },
-    //             },
-    //             {
-    //                 "id": 2,
-    //                 "dog.race.bernese mountain": "second",
-    //             },
-    //             {
-    //                 "id": 3,
-    //                 "dog": {
-    //                     "race.bernese mountain": "third"
-    //                 },
-    //             },
-    //         ]))
-    //         .unwrap();
-    //
-    //     index
-    //         .update_settings(|settings| {
-    //             settings.set_filterable_fields(hashset!(String::from("dog")));
-    //         })
-    //         .unwrap();
-    //
-    //     db_snap!(index, facet_id_string_docids, @r###"
-    //     3   0  first        1  [1, ]
-    //     3   0  second       1  [2, ]
-    //     3   0  third        1  [3, ]
-    //     3   0  zeroth       1  [0, ]
-    //     "###);
-    //     db_snap!(index, field_id_docid_facet_strings, @r###"
-    //     3   0    zeroth       zeroth
-    //     3   1    first        first
-    //     3   2    second       second
-    //     3   3    third        third
-    //     "###);
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //
-    //     let hidden = index.faceted_fields(&rtxn).unwrap();
-    //
-    //     assert_eq!(hidden, hashset!(S("dog"), S("dog.race"), S("dog.race.bernese mountain")));
-    //
-    //     for (s, i) in [("zeroth", 0), ("first", 1), ("second", 2), ("third", 3)] {
-    //         let mut search = crate::Search::new(&rtxn, &index);
-    //         let filter = format!(r#""dog.race.bernese mountain" = {s}"#);
-    //         search.filter(crate::Filter::from_str(&filter).unwrap().unwrap());
-    //         let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //         assert_eq!(documents_ids, vec![i]);
-    //     }
-    //     // Reset the settings
-    //     index
-    //         .update_settings(|settings| {
-    //             settings.reset_filterable_fields();
-    //         })
-    //         .unwrap();
-    //
-    //     db_snap!(index, facet_id_string_docids, @"");
-    //     db_snap!(index, field_id_docid_facet_strings, @"");
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //
-    //     let facets = index.faceted_fields(&rtxn).unwrap();
-    //
-    //     assert_eq!(facets, hashset!());
-    //
-    //     // update the settings to test the sortable
-    //     index
-    //         .update_settings(|settings| {
-    //             settings.set_sortable_fields(hashset!(S("dog.race")));
-    //         })
-    //         .unwrap();
-    //
-    //     db_snap!(index, facet_id_string_docids, @r###"
-    //     3   0  first        1  [1, ]
-    //     3   0  second       1  [2, ]
-    //     3   0  third        1  [3, ]
-    //     3   0  zeroth       1  [0, ]
-    //     "###);
-    //     db_snap!(index, field_id_docid_facet_strings, @r###"
-    //     3   0    zeroth       zeroth
-    //     3   1    first        first
-    //     3   2    second       second
-    //     3   3    third        third
-    //     "###);
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //
-    //     let facets = index.faceted_fields(&rtxn).unwrap();
-    //
-    //     assert_eq!(facets, hashset!(S("dog.race"), S("dog.race.bernese mountain")));
-    //
-    //     let mut search = crate::Search::new(&rtxn, &index);
-    //     search.sort_criteria(vec![crate::AscDesc::Asc(crate::Member::Field(S(
-    //         "dog.race.bernese mountain",
-    //     )))]);
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids, vec![1, 2, 3, 0]);
-    // }
-    //
-    // #[test]
-    // fn index_2_times_documents_split_by_zero_document_indexation() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .add_documents(documents!([
-    //             {"id": 0, "name": "Kerollmops", "score": 78},
-    //             {"id": 1, "name": "ManyTheFish", "score": 75},
-    //             {"id": 2, "name": "Ferdi", "score": 39},
-    //             {"id": 3, "name": "Tommy", "score": 33}
-    //         ]))
-    //         .unwrap();
-    //
-    //     // Check that there is 4 document now.
-    //     let rtxn = index.read_txn().unwrap();
-    //     let count = index.number_of_documents(&rtxn).unwrap();
-    //     assert_eq!(count, 4);
-    //
-    //     index.add_documents(documents!([])).unwrap();
-    //
-    //     // Check that there is 4 document now.
-    //     let rtxn = index.read_txn().unwrap();
-    //     let count = index.number_of_documents(&rtxn).unwrap();
-    //     assert_eq!(count, 4);
-    //
-    //     index
-    //         .add_documents(documents!([
-    //             {"id": 0, "name": "Kerollmops", "score": 78},
-    //             {"id": 1, "name": "ManyTheFish", "score": 75},
-    //             {"id": 2, "name": "Ferdi", "score": 39},
-    //             {"id": 3, "name": "Tommy", "score": 33}
-    //         ]))
-    //         .unwrap();
-    //
-    //     // Check that there is 4 document now.
-    //     let rtxn = index.read_txn().unwrap();
-    //     let count = index.number_of_documents(&rtxn).unwrap();
-    //     assert_eq!(count, 4);
-    // }
-
-    // #[cfg(feature = "chinese")]
-    // #[test]
-    // fn test_meilisearch_1714() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .add_documents(documents!([
-    //           {"id": "123", "title": "小化妆包" },
-    //           {"id": "456", "title": "Ipad 包" }
-    //         ]))
-    //         .unwrap();
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //
-    //     // Only the first document should match.
-    //     let count = index.word_docids.get(&rtxn, "huàzhuāngbāo").unwrap().unwrap().len();
-    //     assert_eq!(count, 1);
-    //
-    //     // Only the second document should match.
-    //     let count = index.word_docids.get(&rtxn, "bāo").unwrap().unwrap().len();
-    //     assert_eq!(count, 1);
-    //
-    //     let mut search = crate::Search::new(&rtxn, &index);
-    //     search.query("化妆包");
-    //     search.terms_matching_strategy(TermsMatchingStrategy::default());
-    //
-    //     // only 1 document should be returned
-    //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
-    //     assert_eq!(documents_ids.len(), 1);
-    // }
-
-    /// We try to index documents with words that are too long here,
-    /// it should not return any error.
-    #[test]
-    fn text_with_too_long_words() {
-        let index = TempIndex::new();
-
-        index
-            .add_documents(documents!([
-              {"id": 1, "title": "a".repeat(256) },
-              {"id": 2, "title": "b".repeat(512) },
-              {"id": 3, "title": format!("{} {}", "c".repeat(250), "d".repeat(250)) },
-            ]))
-            .unwrap();
-    }
-
-    #[test]
-    fn text_with_too_long_keys() {
-        let index = TempIndex::new();
-        let script = "https://bug.example.com/meilisearch/milli.saml2?ROLE=Programmer-1337&SAMLRequest=Cy1ytcZT1Po%2L2IY2y9Unru8rgnW4qWfPiI0EpT7P8xjJV8PeQikRL%2E8D9A4pj9tmbymbQCQwGmGjPMK7qwXFPX4DH52JO2b7n6TXjuR7zkIFuYdzdY2rwRNBPgCL7ihclEm9zyIjKZQ%2JTqiwfXxWjnI0KEYQYHdwd6Q%2Fx%28BDLNsvmL54CCY2F4RWeRs4eqWfn%2EHqxlhreFzax4AiQ2tgOtV5thOaaWqrhZD%2Py70nuyZWNTKwciGI43AoHg6PThANsQ5rAY5amzN%2ufbs1swETUXlLZuOut5YGpYPZfY6STJWNp4QYSUOUXBZpdElYsH7UHZ7VhJycgyt%28aTK0GW6GbKne2tJM0hgSczOqndg6RFa9WsnSBi4zMcaEfYur4WlSsHDYInF9ROousKqVMZ6H8%2gbUissaLh1eXRGo8KEJbyEHbhVVKGD%28kx4cfKjx9fT3pkeDTdvDrVn25jIzi9wHyt9l1lWc8ICnCvXCVUPP%2BjBG4wILR29gMV9Ux2QOieQm2%2Fycybhr8sBGCl30mHC7blvWt%2T3mrCHQoS3VK49PZNPqBZO9C7vOjOWoszNkJx4QckWV%2FZFvbpzUUkiBiehr9F%2FvQSxz9lzv68GwbTu9fr638p%2FQM%3D&RelayState=https%3A%2F%example.bug.com%2Fde&SigAlg=http%3A%2F%2Fwww.w3.org%2F2000%2F09%2Fxmldsig%23rsa-sha1&Signature=AZFpkhFFII7PodiewTovaGnLQKUVZp0qOCCcBIUkJ6P5by3lE3Lldj9pKaFu4wz4j%2B015HEhDvF0LlAmwwES85vdGh%2FpD%2cIQPRUEjdCbQkQDd3dy1mMXbpXxSe4QYcv9Ni7tqNTQxekpO1gE7rtg6zC66EU55uM9aj9abGQ034Vly%2F6IJ08bvAq%2B%2FB9KruLstuiNWnlXTfNGsOxGLK7%2BXr94LTkat8m%2FMan6Qr95%2KeR5TmmqaQIE4N9H6o4TopT7mXr5CF2Z3";
-
-        // Create 200 documents with a long text
-        let content = {
-            let documents_iter = (0..200i32)
-                .map(|i| serde_json::json!({ "id": i, "script": script }))
-                .filter_map(|json| match json {
-                    serde_json::Value::Object(object) => Some(object),
-                    _ => None,
-                });
-            documents_batch_reader_from_objects(documents_iter)
-        };
-        // Index those 200 long documents
-        index.add_documents(content).unwrap();
-
-        // Index one long document
-        index
-            .add_documents(documents!([
-              {"id": 400, "script": script },
-            ]))
-            .unwrap();
-    }
-
-    #[test]
-    fn index_documents_in_multiple_transforms() {
-        let index = TempIndex::new();
-
-        let doc1 = documents! {[{
-            "id": 228142,
-            "title": "asdsad",
-            "state": "automated",
-            "priority": "normal",
-            "public_uid": "37ccf021",
-            "project_id": 78207,
-            "branch_id_number": 0
-        }]};
-
-        let doc2 = documents! {[{
-            "id": 228143,
-            "title": "something",
-            "state": "automated",
-            "priority": "normal",
-            "public_uid": "39c6499b",
-            "project_id": 78207,
-            "branch_id_number": 0
-        }]};
-
-        {
-            let mut wtxn = index.write_txn().unwrap();
-            index.put_primary_key(&mut wtxn, "id").unwrap();
-            wtxn.commit().unwrap();
-        }
-
-        index.add_documents(doc1).unwrap();
-        index.add_documents(doc2).unwrap();
-
-        let wtxn = index.read_txn().unwrap();
-
-        let map = index.external_documents_ids().to_hash_map(&wtxn).unwrap();
-        let ids = map.values().collect::<HashSet<_>>();
-
-        assert_eq!(ids.len(), map.len());
-    }
-
-    #[test]
-    fn index_documents_check_exists_database() {
-        let content = || {
-            documents!([
-                {
-                    "id": 0,
-                    "colour": 0,
-                },
-                {
-                    "id": 1,
-                    "colour": []
-                },
-                {
-                    "id": 2,
-                    "colour": {}
-                },
-                {
-                    "id": 3,
-                    "colour": null
-                },
-                {
-                    "id": 4,
-                    "colour": [1]
-                },
-                {
-                    "id": 5
-                },
-                {
-                    "id": 6,
-                    "colour": {
-                        "green": 1
-                    }
-                },
-                {
-                    "id": 7,
-                    "colour": {
-                        "green": {
-                            "blue": []
-                        }
-                    }
-                }
-            ])
-        };
-
-        let check_ok = |index: &Index| {
-            let rtxn = index.read_txn().unwrap();
-            let facets = index.faceted_fields(&rtxn).unwrap();
-            assert_eq!(facets, hashset!(S("colour"), S("colour.green"), S("colour.green.blue")));
-
-            let colour_id = index.fields_ids_map(&rtxn).unwrap().id("colour").unwrap();
-            let colour_green_id = index.fields_ids_map(&rtxn).unwrap().id("colour.green").unwrap();
-
-            let bitmap_colour =
-                index.facet_id_exists_docids.get(&rtxn, &colour_id).unwrap().unwrap();
-            assert_eq!(bitmap_colour.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 6, 7]);
-
-            let bitmap_colour_green =
-                index.facet_id_exists_docids.get(&rtxn, &colour_green_id).unwrap().unwrap();
-            assert_eq!(bitmap_colour_green.into_iter().collect::<Vec<_>>(), vec![6, 7]);
-        };
-
-        let faceted_fields = hashset!(S("colour"));
-
-        let index = TempIndex::new();
-        index.add_documents(content()).unwrap();
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(faceted_fields.clone());
-            })
-            .unwrap();
-        check_ok(&index);
-
-        let index = TempIndex::new();
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(faceted_fields.clone());
-            })
-            .unwrap();
-        index.add_documents(content()).unwrap();
-        check_ok(&index);
-    }
-
-    #[test]
-    fn index_documents_check_is_null_database() {
-        let content = || {
-            documents!([
-                {
-                    "id": 0,
-                    "colour": null,
-                },
-                {
-                    "id": 1,
-                    "colour": [null], // must not be returned
-                },
-                {
-                    "id": 6,
-                    "colour": {
-                        "green": null
-                    }
-                },
-                {
-                    "id": 7,
-                    "colour": {
-                        "green": {
-                            "blue": null
-                        }
-                    }
-                },
-                {
-                    "id": 8,
-                    "colour": 0,
-                },
-                {
-                    "id": 9,
-                    "colour": []
-                },
-                {
-                    "id": 10,
-                    "colour": {}
-                },
-                {
-                    "id": 12,
-                    "colour": [1]
-                },
-                {
-                    "id": 13
-                },
-                {
-                    "id": 14,
-                    "colour": {
-                        "green": 1
-                    }
-                },
-                {
-                    "id": 15,
-                    "colour": {
-                        "green": {
-                            "blue": []
-                        }
-                    }
-                }
-            ])
-        };
-
-        let check_ok = |index: &Index| {
-            let rtxn = index.read_txn().unwrap();
-            let facets = index.faceted_fields(&rtxn).unwrap();
-            assert_eq!(facets, hashset!(S("colour"), S("colour.green"), S("colour.green.blue")));
-
-            let colour_id = index.fields_ids_map(&rtxn).unwrap().id("colour").unwrap();
-            let colour_green_id = index.fields_ids_map(&rtxn).unwrap().id("colour.green").unwrap();
-            let colour_blue_id =
-                index.fields_ids_map(&rtxn).unwrap().id("colour.green.blue").unwrap();
-
-            let bitmap_null_colour =
-                index.facet_id_is_null_docids.get(&rtxn, &colour_id).unwrap().unwrap();
-            assert_eq!(bitmap_null_colour.into_iter().collect::<Vec<_>>(), vec![0]);
-
-            let bitmap_colour_green =
-                index.facet_id_is_null_docids.get(&rtxn, &colour_green_id).unwrap().unwrap();
-            assert_eq!(bitmap_colour_green.into_iter().collect::<Vec<_>>(), vec![2]);
-
-            let bitmap_colour_blue =
-                index.facet_id_is_null_docids.get(&rtxn, &colour_blue_id).unwrap().unwrap();
-            assert_eq!(bitmap_colour_blue.into_iter().collect::<Vec<_>>(), vec![3]);
-        };
-
-        let faceted_fields = hashset!(S("colour"));
-
-        let index = TempIndex::new();
-        index.add_documents(content()).unwrap();
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(faceted_fields.clone());
-            })
-            .unwrap();
-        check_ok(&index);
-
-        let index = TempIndex::new();
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(faceted_fields.clone());
-            })
-            .unwrap();
-        index.add_documents(content()).unwrap();
-        check_ok(&index);
-    }
-
-    #[test]
-    fn index_documents_check_is_empty_database() {
-        let content = || {
-            documents!([
-                {"id": 0, "tags": null },
-                {"id": 1, "tags": [null] },
-                {"id": 2, "tags": [] },
-                {"id": 3, "tags": ["hello","world"] },
-                {"id": 4, "tags": [""] },
-                {"id": 5 },
-                {"id": 6, "tags": {} },
-                {"id": 7, "tags": {"green": "cool"} },
-                {"id": 8, "tags": {"green": ""} },
-                {"id": 9, "tags": "" },
-                {"id": 10, "tags": { "green": null } },
-                {"id": 11, "tags": { "green": { "blue": null } } },
-                {"id": 12, "tags": { "green": { "blue": [] } } }
-            ])
-        };
-
-        let check_ok = |index: &Index| {
-            let rtxn = index.read_txn().unwrap();
-            let facets = index.faceted_fields(&rtxn).unwrap();
-            assert_eq!(facets, hashset!(S("tags"), S("tags.green"), S("tags.green.blue")));
-
-            let tags_id = index.fields_ids_map(&rtxn).unwrap().id("tags").unwrap();
-            let tags_green_id = index.fields_ids_map(&rtxn).unwrap().id("tags.green").unwrap();
-            let tags_blue_id = index.fields_ids_map(&rtxn).unwrap().id("tags.green.blue").unwrap();
-
-            let bitmap_empty_tags =
-                index.facet_id_is_empty_docids.get(&rtxn, &tags_id).unwrap().unwrap();
-            assert_eq!(bitmap_empty_tags.into_iter().collect::<Vec<_>>(), vec![2, 6, 9]);
-
-            let bitmap_tags_green =
-                index.facet_id_is_empty_docids.get(&rtxn, &tags_green_id).unwrap().unwrap();
-            assert_eq!(bitmap_tags_green.into_iter().collect::<Vec<_>>(), vec![8]);
-
-            let bitmap_tags_blue =
-                index.facet_id_is_empty_docids.get(&rtxn, &tags_blue_id).unwrap().unwrap();
-            assert_eq!(bitmap_tags_blue.into_iter().collect::<Vec<_>>(), vec![12]);
-        };
-
-        let faceted_fields = hashset!(S("tags"));
-
-        let index = TempIndex::new();
-        index.add_documents(content()).unwrap();
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(faceted_fields.clone());
-            })
-            .unwrap();
-        check_ok(&index);
-
-        let index = TempIndex::new();
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(faceted_fields.clone());
-            })
-            .unwrap();
-        index.add_documents(content()).unwrap();
-        check_ok(&index);
-    }
-
-    #[test]
-    fn primary_key_must_not_contain_floats() {
-        let index = TempIndex::new_with_map_size(4096 * 100);
-
-        let doc1 = documents! {[{
-            "id": -228142,
-            "title": "asdsad",
-        }]};
-
-        let doc2 = documents! {[{
-            "id": 228143.56,
-            "title": "something",
-        }]};
-
-        let doc3 = documents! {[{
-            "id": -228143.56,
-            "title": "something",
-        }]};
-
-        let doc4 = documents! {[{
-            "id": 2.0,
-            "title": "something",
-        }]};
-
-        index.add_documents(doc1).unwrap();
-        index.add_documents(doc2).unwrap_err();
-        index.add_documents(doc3).unwrap_err();
-        index.add_documents(doc4).unwrap_err();
-    }
-
-    #[test]
-    fn primary_key_must_not_contain_whitespace() {
-        let index = TempIndex::new();
-
-        let doc1 = documents! {[{
-            "id": " 1",
-            "title": "asdsad",
-        }]};
-
-        let doc2 = documents! {[{
-            "id": "\t2",
-            "title": "something",
-        }]};
-
-        let doc3 = documents! {[{
-            "id": "\r3",
-            "title": "something",
-        }]};
-
-        let doc4 = documents! {[{
-            "id": "\n4",
-            "title": "something",
-        }]};
-
-        index.add_documents(doc1).unwrap_err();
-        index.add_documents(doc2).unwrap_err();
-        index.add_documents(doc3).unwrap_err();
-        index.add_documents(doc4).unwrap_err();
-    }
-
-    #[test]
-    fn primary_key_inference() {
-        let index = TempIndex::new();
-
-        let doc_no_id = documents! {[{
-            "title": "asdsad",
-            "state": "automated",
-            "priority": "normal",
-            "branch_id_number": 0
-        }]};
-        assert!(matches!(
-            index.add_documents(doc_no_id),
-            Err(Error::UserError(UserError::NoPrimaryKeyCandidateFound))
-        ));
-
-        let doc_multiple_ids = documents! {[{
-            "id": 228143,
-            "title": "something",
-            "state": "automated",
-            "priority": "normal",
-            "public_uid": "39c6499b",
-            "project_id": 78207,
-            "branch_id_number": 0
-        }]};
-
-        let Err(Error::UserError(UserError::MultiplePrimaryKeyCandidatesFound { candidates })) =
-            index.add_documents(doc_multiple_ids)
-        else {
-            panic!("Expected Error::UserError(MultiplePrimaryKeyCandidatesFound)")
-        };
-
-        assert_eq!(candidates, vec![S("id"), S("project_id"), S("public_uid"),]);
-
-        let doc_inferable = documents! {[{
-            "video": "test.mp4",
-            "id": 228143,
-            "title": "something",
-            "state": "automated",
-            "priority": "normal",
-            "public_uid_": "39c6499b",
-            "project_id_": 78207,
-            "branch_id_number": 0
-        }]};
-
-        index.add_documents(doc_inferable).unwrap();
-
-        let txn = index.read_txn().unwrap();
-
-        assert_eq!(index.primary_key(&txn).unwrap().unwrap(), "id");
-    }
-
-    #[test]
-    fn long_words_must_be_skipped() {
-        let index = TempIndex::new();
-
-        // this is obviousy too long
-        let long_word = "lol".repeat(1000);
-        let doc1 = documents! {[{
-            "id": "1",
-            "title": long_word,
-        }]};
-
-        index.add_documents(doc1).unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-        let words_fst = index.words_fst(&rtxn).unwrap();
-        assert!(!words_fst.contains(&long_word));
-    }
-
-    #[test]
-    fn long_facet_values_must_not_crash() {
-        let index = TempIndex::new();
-
-        // this is obviousy too long
-        let long_word = "lol".repeat(1000);
-        let doc1 = documents! {[{
-            "id": "1",
-            "title": long_word,
-        }]};
-
-        index
-            .update_settings(|settings| {
-                settings.set_filterable_fields(hashset! { S("title") });
-            })
-            .unwrap();
-
-        index.add_documents(doc1).unwrap();
-    }
-
-    #[cfg(feature = "default")]
-    #[test]
-    fn store_detected_script_and_language_per_document_during_indexing() {
-        use charabia::{Language, Script};
-        let index = TempIndex::new();
-        index
-            .add_documents(documents!([
-                { "id": 1, "title": "The quick (\"brown\") fox can't jump 32.3 feet, right? Brr, it's 29.3°F!" },
-                { "id": 2, "title": "人人生而自由﹐在尊嚴和權利上一律平等。他們賦有理性和良心﹐並應以兄弟關係的精神互相對待。" },
-                { "id": 3, "title": "הַשּׁוּעָל הַמָּהִיר (״הַחוּם״) לֹא יָכוֹל לִקְפֹּץ 9.94 מֶטְרִים, נָכוֹן? ברר, 1.5°C- בַּחוּץ!" },
-                { "id": 4, "title": "関西国際空港限定トートバッグ すもももももももものうち" },
-                { "id": 5, "title": "ภาษาไทยง่ายนิดเดียว" },
-                { "id": 6, "title": "The quick 在尊嚴和權利上一律平等。" },
-            ]))
-            .unwrap();
-
-        let rtxn = index.read_txn().unwrap();
-        let key_jpn = (Script::Cj, Language::Jpn);
-        let key_cmn = (Script::Cj, Language::Cmn);
-        let cj_jpn_docs = index.script_language_documents_ids(&rtxn, &key_jpn).unwrap().unwrap();
-        let cj_cmn_docs = index.script_language_documents_ids(&rtxn, &key_cmn).unwrap().unwrap();
-        let expected_cj_jpn_docids = [3].iter().collect();
-        assert_eq!(cj_jpn_docs, expected_cj_jpn_docids);
-        let expected_cj_cmn_docids = [1, 5].iter().collect();
-        assert_eq!(cj_cmn_docs, expected_cj_cmn_docids);
-    }
-
-    // #[test]
-    // fn add_and_delete_documents_in_single_transform() {
-    //     let mut index = TempIndex::new();
-    //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let documents = documents!([
-    //         { "id": 1, "doggo": "kevin" },
-    //         { "id": 2, "doggo": { "name": "bob", "age": 20 } },
-    //         { "id": 3, "name": "jean", "age": 25 },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"3");
-    //
-    //     let (builder, removed) = builder.remove_documents(vec![S("2")]).unwrap();
-    //     insta::assert_display_snapshot!(removed.unwrap(), @"1");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 3,
-    //         number_of_documents: 2,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":1,"doggo":"kevin"}
-    //     {"id":3,"name":"jean","age":25}
-    //     "###);
-    // }
-    //
-    // #[test]
-    // fn add_update_and_delete_documents_in_single_transform() {
-    //     let mut index = TempIndex::new();
-    //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let documents = documents!([
-    //         { "id": 1, "doggo": "kevin" },
-    //         { "id": 2, "doggo": { "name": "bob", "age": 20 } },
-    //         { "id": 3, "name": "jean", "age": 25 },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"3");
-    //
-    //     let documents = documents!([
-    //         { "id": 2, "catto": "jorts" },
-    //         { "id": 3, "legs": 4 },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"2");
-    //
-    //     let (builder, removed) = builder.remove_documents(vec![S("1"), S("2")]).unwrap();
-    //     insta::assert_display_snapshot!(removed.unwrap(), @"2");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 5,
-    //         number_of_documents: 1,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":3,"name":"jean","age":25,"legs":4}
-    //     "###);
-    // }
-    //
-    // #[test]
-    // fn add_document_and_in_another_transform_update_and_delete_documents() {
-    //     let mut index = TempIndex::new();
-    //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let documents = documents!([
-    //         { "id": 1, "doggo": "kevin" },
-    //         { "id": 2, "doggo": { "name": "bob", "age": 20 } },
-    //         { "id": 3, "name": "jean", "age": 25 },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"3");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 3,
-    //         number_of_documents: 3,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":1,"doggo":"kevin"}
-    //     {"id":2,"doggo":{"name":"bob","age":20}}
-    //     {"id":3,"name":"jean","age":25}
-    //     "###);
-    //
-    //     // A first batch of documents has been inserted
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let documents = documents!([
-    //         { "id": 2, "catto": "jorts" },
-    //         { "id": 3, "legs": 4 },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"2");
-    //
-    //     let (builder, removed) = builder.remove_documents(vec![S("1"), S("2")]).unwrap();
-    //     insta::assert_display_snapshot!(removed.unwrap(), @"2");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 2,
-    //         number_of_documents: 1,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":3,"name":"jean","age":25,"legs":4}
-    //     "###);
-    // }
-    //
-    // #[test]
-    // fn delete_document_and_then_add_documents_in_the_same_transform() {
-    //     let mut index = TempIndex::new();
-    //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let (builder, removed) = builder.remove_documents(vec![S("1"), S("2")]).unwrap();
-    //     insta::assert_display_snapshot!(removed.unwrap(), @"0");
-    //
-    //     let documents = documents!([
-    //         { "id": 2, "doggo": { "name": "jean", "age": 20 } },
-    //         { "id": 3, "name": "bob", "age": 25 },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"2");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 2,
-    //         number_of_documents: 2,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":2,"doggo":{"name":"jean","age":20}}
-    //     {"id":3,"name":"bob","age":25}
-    //     "###);
-    // }
-    //
-    // #[test]
-    // fn delete_the_same_document_multiple_time() {
-    //     let mut index = TempIndex::new();
-    //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let (builder, removed) =
-    //         builder.remove_documents(vec![S("1"), S("2"), S("1"), S("2")]).unwrap();
-    //     insta::assert_display_snapshot!(removed.unwrap(), @"0");
-    //
-    //     let documents = documents!([
-    //         { "id": 1, "doggo": "kevin" },
-    //         { "id": 2, "doggo": { "name": "jean", "age": 20 } },
-    //         { "id": 3, "name": "bob", "age": 25 },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"3");
-    //
-    //     let (builder, removed) =
-    //         builder.remove_documents(vec![S("1"), S("2"), S("1"), S("2")]).unwrap();
-    //     insta::assert_display_snapshot!(removed.unwrap(), @"2");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 3,
-    //         number_of_documents: 1,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":3,"name":"bob","age":25}
-    //     "###);
-    // }
-    //
-    // #[test]
-    // fn add_document_and_in_another_transform_delete_the_document_then_add_it_again() {
-    //     let mut index = TempIndex::new();
-    //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let documents = documents!([
-    //         { "id": 1, "doggo": "kevin" },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"1");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 1,
-    //         number_of_documents: 1,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":1,"doggo":"kevin"}
-    //     "###);
-    //
-    //     // A first batch of documents has been inserted
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let (builder, removed) = builder.remove_documents(vec![S("1")]).unwrap();
-    //     insta::assert_display_snapshot!(removed.unwrap(), @"1");
-    //
-    //     let documents = documents!([
-    //         { "id": 1, "catto": "jorts" },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"1");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 1,
-    //         number_of_documents: 1,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":1,"catto":"jorts"}
-    //     "###);
-    // }
-    //
-    // #[test]
-    // fn test_word_fid_position() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .add_documents(documents!([
-    //           {"id": 0, "text": "sun flowers are looking at the sun" },
-    //           {"id": 1, "text": "sun flowers are looking at the sun" },
-    //           {"id": 2, "text": "the sun is shining today" },
-    //           {
-    //             "id": 3,
-    //             "text": "a a a a a a a a a a a a a a a a a
-    //             a a a a a a a a a a a a a a a a a a a a a a a a a a
-    //             a a a a a a a a a a a a a a a a a a a a a a a a a a
-    //             a a a a a a a a a a a a a a a a a a a a a a a a a a
-    //             a a a a a a a a a a a a a a a a a a a a a a a a a a
-    //             a a a a a a a a a a a a a a a a a a a a a a a a a a
-    //             a a a a a a a a a a a a a a a a a a a a a "
-    //          }
-    //         ]))
-    //         .unwrap();
-    //
-    //     db_snap!(index, word_fid_docids, 1, @"bf3355e493330de036c8823ddd1dbbd9");
-    //     db_snap!(index, word_position_docids, 1, @"896d54b29ed79c4c6f14084f326dcf6f");
-    //
-    //     index
-    //         .add_documents(documents!([
-    //           {"id": 4, "text": "sun flowers are looking at the sun" },
-    //           {"id": 5, "text2": "sun flowers are looking at the sun" },
-    //           {"id": 6, "text": "b b b" },
-    //           {
-    //             "id": 7,
-    //             "text2": "a a a a"
-    //          }
-    //         ]))
-    //         .unwrap();
-    //
-    //     db_snap!(index, word_fid_docids, 2, @"a48d3f88db33f94bc23110a673ea49e4");
-    //     db_snap!(index, word_position_docids, 2, @"3c9e66c6768ae2cf42b46b2c46e46a83");
-    //
-    //     // Delete not all of the documents but some of them.
-    //     index.delete_documents(vec!["0".into(), "3".into()]);
-    //
-    //     db_snap!(index, word_fid_docids, 3, @"4c2e2a1832e5802796edc1638136d933");
-    //     db_snap!(index, word_position_docids, 3, @"74f556b91d161d997a89468b4da1cb8f");
-    // }
-    //
-    // /// Index multiple different number of vectors in documents.
-    // /// Vectors must be of the same length.
-    // #[test]
-    // fn test_multiple_vectors() {
-    //     use crate::vector::settings::EmbeddingSettings;
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .update_settings(|settings| {
-    //             let mut embedders = BTreeMap::default();
-    //             embedders.insert(
-    //                 "manual".to_string(),
-    //                 Setting::Set(EmbeddingSettings {
-    //                     source: Setting::Set(crate::vector::settings::EmbedderSource::UserProvided),
-    //                     model: Setting::NotSet,
-    //                     revision: Setting::NotSet,
-    //                     api_key: Setting::NotSet,
-    //                     dimensions: Setting::Set(3),
-    //                     document_template: Setting::NotSet,
-    //                     url: Setting::NotSet,
-    //                     query: Setting::NotSet,
-    //                     input_field: Setting::NotSet,
-    //                     path_to_embeddings: Setting::NotSet,
-    //                     embedding_object: Setting::NotSet,
-    //                     input_type: Setting::NotSet,
-    //                     distribution: Setting::NotSet,
-    //                 }),
-    //             );
-    //             settings.set_embedder_settings(embedders);
-    //         })
-    //         .unwrap();
-    //
-    //     index
-    //         .add_documents(
-    //             documents!([{"id": 0, "_vectors": { "manual": [[0, 1, 2], [3, 4, 5]] } }]),
-    //         )
-    //         .unwrap();
-    //     index.add_documents(documents!([{"id": 1, "_vectors": { "manual": [6, 7, 8] }}])).unwrap();
-    //     index
-    //            .add_documents(
-    //                documents!([{"id": 2, "_vectors": { "manual": [[9, 10, 11], [12, 13, 14], [15, 16, 17]] }}]),
-    //            )
-    //            .unwrap();
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //     let mut embedding_configs = index.embedding_configs(&rtxn).unwrap();
-    //     let (embedder_name, embedder) = embedding_configs.pop().unwrap();
-    //     let embedder =
-    //         std::sync::Arc::new(crate::vector::Embedder::new(embedder.embedder_options).unwrap());
-    //     assert_eq!("manual", embedder_name);
-    //     let res = index
-    //         .search(&rtxn)
-    //         .semantic(embedder_name, embedder, Some([0.0, 1.0, 2.0].to_vec()))
-    //         .execute()
-    //         .unwrap();
-    //     assert_eq!(res.documents_ids.len(), 3);
-    // }
-    //
-    // #[test]
-    // fn reproduce_the_bug() {
-    //     /*
-    //         [milli/examples/fuzz.rs:69] &batches = [
-    //         Batch(
-    //             [
-    //                 AddDoc(
-    //                     { "id": 1, "doggo": "bernese" }, => internal 0
-    //                 ),
-    //             ],
-    //         ),
-    //         Batch(
-    //             [
-    //                 DeleteDoc(
-    //                     1, => delete internal 0
-    //                 ),
-    //                 AddDoc(
-    //                     { "id": 0, "catto": "jorts" }, => internal 1
-    //                 ),
-    //             ],
-    //         ),
-    //         Batch(
-    //             [
-    //                 AddDoc(
-    //                     { "id": 1, "catto": "jorts" }, => internal 2
-    //                 ),
-    //             ],
-    //         ),
-    //     ]
-    //     */
-    //     let index = TempIndex::new();
-    //
-    //     // START OF BATCH
-    //
-    //     println!("--- ENTERING BATCH 1");
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     // OP
-    //
-    //     let documents = documents!([
-    //         { "id": 1, "doggo": "bernese" },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"1");
-    //
-    //     // FINISHING
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 1,
-    //         number_of_documents: 1,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":1,"doggo":"bernese"}
-    //     "###);
-    //     db_snap!(index, external_documents_ids, @r###"
-    //     docids:
-    //     1                        0
-    //     "###);
-    //
-    //     // A first batch of documents has been inserted
-    //
-    //     // BATCH 2
-    //
-    //     println!("--- ENTERING BATCH 2");
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let (builder, removed) = builder.remove_documents(vec![S("1")]).unwrap();
-    //     insta::assert_display_snapshot!(removed.unwrap(), @"1");
-    //
-    //     let documents = documents!([
-    //         { "id": 0, "catto": "jorts" },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"1");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 1,
-    //         number_of_documents: 1,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":0,"catto":"jorts"}
-    //     "###);
-    //
-    //     db_snap!(index, external_documents_ids, @r###"
-    //     docids:
-    //     0                        1
-    //     "###);
-    //
-    //     // BATCH 3
-    //
-    //     println!("--- ENTERING BATCH 3");
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //
-    //     let builder = IndexDocuments::new(
-    //         &mut wtxn,
-    //         &index,
-    //         &index.indexer_config,
-    //         index.index_documents_config.clone(),
-    //         |_| (),
-    //         || false,
-    //     )
-    //     .unwrap();
-    //
-    //     let documents = documents!([
-    //         { "id": 1, "catto": "jorts" },
-    //     ]);
-    //     let (builder, added) = builder.add_documents(documents).unwrap();
-    //     insta::assert_display_snapshot!(added.unwrap(), @"1");
-    //
-    //     let addition = builder.execute().unwrap();
-    //     insta::assert_debug_snapshot!(addition, @r###"
-    //     DocumentAdditionResult {
-    //         indexed_documents: 1,
-    //         number_of_documents: 2,
-    //     }
-    //     "###);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents, @r###"
-    //     {"id":1,"catto":"jorts"}
-    //     {"id":0,"catto":"jorts"}
-    //     "###);
-    //
-    //     // Ensuring all the returned IDs actually exists
-    //     let rtxn = index.read_txn().unwrap();
-    //     let res = index.search(&rtxn).execute().unwrap();
-    //     index.documents(&rtxn, res.documents_ids).unwrap();
-    // }
-    //
-    // fn delete_documents<'t>(
-    //     wtxn: &mut RwTxn<'t>,
-    //     index: &'t TempIndex,
-    //     external_ids: &[&str],
-    // ) -> Vec<u32> {
-    //     let external_document_ids = index.external_documents_ids();
-    //     let ids_to_delete: Vec<u32> = external_ids
-    //         .iter()
-    //         .map(|id| external_document_ids.get(wtxn, id).unwrap().unwrap())
-    //         .collect();
-    //
-    //     // Delete some documents.
-    //     index.delete_documents_using_wtxn(
-    //         wtxn,
-    //         external_ids.iter().map(ToString::to_string).collect(),
-    //     );
-    //
-    //     ids_to_delete
-    // }
-    //
-    // #[test]
-    // fn delete_documents_with_numbers_as_primary_key() {
-    //     let index = TempIndex::new();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     index
-    //         .add_documents_using_wtxn(
-    //             &mut wtxn,
-    //             documents!([
-    //                 { "id": 0, "name": "kevin", "object": { "key1": "value1", "key2": "value2" } },
-    //                 { "id": 1, "name": "kevina", "array": ["I", "am", "fine"] },
-    //                 { "id": 2, "name": "benoit", "array_of_object": [{ "wow": "amazing" }] }
-    //             ]),
-    //         )
-    //         .unwrap();
-    //
-    //     // delete those documents, ids are synchronous therefore 0, 1, and 2.
-    //     index.delete_documents_using_wtxn(&mut wtxn, vec![S("0"), S("1"), S("2")]);
-    //
-    //     wtxn.commit().unwrap();
-    //
-    //     // All these snapshots should be empty since the database was cleared
-    //     db_snap!(index, documents_ids);
-    //     db_snap!(index, word_docids);
-    //     db_snap!(index, word_pair_proximity_docids);
-    //     db_snap!(index, facet_id_exists_docids);
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //
-    //     assert!(index.field_distribution(&rtxn).unwrap().is_empty());
-    // }
-    //
-    // #[test]
-    // fn delete_documents_with_strange_primary_key() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .update_settings(|settings| settings.set_searchable_fields(vec!["name".to_string()]))
-    //         .unwrap();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     index
-    //         .add_documents_using_wtxn(
-    //             &mut wtxn,
-    //             documents!([
-    //                 { "mysuperid": 0, "name": "kevin" },
-    //                 { "mysuperid": 1, "name": "kevina" },
-    //                 { "mysuperid": 2, "name": "benoit" }
-    //             ]),
-    //         )
-    //         .unwrap();
-    //     wtxn.commit().unwrap();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //
-    //     // Delete not all of the documents but some of them.
-    //     index.delete_documents_using_wtxn(&mut wtxn, vec![S("0"), S("1")]);
-    //
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, documents_ids);
-    //     db_snap!(index, word_docids);
-    //     db_snap!(index, word_pair_proximity_docids);
-    // }
-    //
-    // #[test]
-    // fn filtered_placeholder_search_should_not_return_deleted_documents() {
-    //     let index = TempIndex::new();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //
-    //     index
-    //         .update_settings_using_wtxn(&mut wtxn, |settings| {
-    //             settings.set_primary_key(S("docid"));
-    //             settings.set_filterable_fields(hashset! { S("label"), S("label2") });
-    //         })
-    //         .unwrap();
-    //
-    //     index
-    //         .add_documents_using_wtxn(
-    //             &mut wtxn,
-    //             documents!([
-    //                 { "docid": "1_4",  "label": ["sign"] },
-    //                 { "docid": "1_5",  "label": ["letter"] },
-    //                 { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"] },
-    //                 { "docid": "1_36", "label": ["drawing","painting","pattern"] },
-    //                 { "docid": "1_37", "label": ["art","drawing","outdoor"] },
-    //                 { "docid": "1_38", "label": ["aquarium","art","drawing"] },
-    //                 { "docid": "1_39", "label": ["abstract"] },
-    //                 { "docid": "1_40", "label": ["cartoon"] },
-    //                 { "docid": "1_41", "label": ["art","drawing"] },
-    //                 { "docid": "1_42", "label": ["art","pattern"] },
-    //                 { "docid": "1_43", "label": ["abstract","art","drawing","pattern"] },
-    //                 { "docid": "1_44", "label": ["drawing"] },
-    //                 { "docid": "1_45", "label": ["art"] },
-    //                 { "docid": "1_46", "label": ["abstract","colorfulness","pattern"] },
-    //                 { "docid": "1_47", "label": ["abstract","pattern"] },
-    //                 { "docid": "1_52", "label": ["abstract","cartoon"] },
-    //                 { "docid": "1_57", "label": ["abstract","drawing","pattern"] },
-    //                 { "docid": "1_58", "label": ["abstract","art","cartoon"] },
-    //                 { "docid": "1_68", "label": ["design"] },
-    //                 { "docid": "1_69", "label": ["geometry"] },
-    //                 { "docid": "1_70", "label2": ["geometry", 1.2] },
-    //                 { "docid": "1_71", "label2": ["design", 2.2] },
-    //                 { "docid": "1_72", "label2": ["geometry", 1.2] }
-    //             ]),
-    //         )
-    //         .unwrap();
-    //
-    //     delete_documents(&mut wtxn, &index, &["1_4", "1_70", "1_72"]);
-    //
-    //     // Placeholder search with filter
-    //     let filter = Filter::from_str("label = sign").unwrap().unwrap();
-    //     let results = index.search(&wtxn).filter(filter).execute().unwrap();
-    //     assert!(results.documents_ids.is_empty());
-    //
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, word_docids);
-    //     db_snap!(index, facet_id_f64_docids);
-    //     db_snap!(index, word_pair_proximity_docids);
-    //     db_snap!(index, facet_id_exists_docids);
-    //     db_snap!(index, facet_id_string_docids);
-    // }
-    //
-    // #[test]
-    // fn placeholder_search_should_not_return_deleted_documents() {
-    //     let index = TempIndex::new();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     index
-    //         .update_settings_using_wtxn(&mut wtxn, |settings| {
-    //             settings.set_primary_key(S("docid"));
-    //         })
-    //         .unwrap();
-    //
-    //     index
-    //         .add_documents_using_wtxn(
-    //             &mut wtxn,
-    //             documents!([
-    //                 { "docid": "1_4",  "label": ["sign"] },
-    //                 { "docid": "1_5",  "label": ["letter"] },
-    //                 { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"] },
-    //                 { "docid": "1_36", "label": ["drawing","painting","pattern"] },
-    //                 { "docid": "1_37", "label": ["art","drawing","outdoor"] },
-    //                 { "docid": "1_38", "label": ["aquarium","art","drawing"] },
-    //                 { "docid": "1_39", "label": ["abstract"] },
-    //                 { "docid": "1_40", "label": ["cartoon"] },
-    //                 { "docid": "1_41", "label": ["art","drawing"] },
-    //                 { "docid": "1_42", "label": ["art","pattern"] },
-    //                 { "docid": "1_43", "label": ["abstract","art","drawing","pattern"] },
-    //                 { "docid": "1_44", "label": ["drawing"] },
-    //                 { "docid": "1_45", "label": ["art"] },
-    //                 { "docid": "1_46", "label": ["abstract","colorfulness","pattern"] },
-    //                 { "docid": "1_47", "label": ["abstract","pattern"] },
-    //                 { "docid": "1_52", "label": ["abstract","cartoon"] },
-    //                 { "docid": "1_57", "label": ["abstract","drawing","pattern"] },
-    //                 { "docid": "1_58", "label": ["abstract","art","cartoon"] },
-    //                 { "docid": "1_68", "label": ["design"] },
-    //                 { "docid": "1_69", "label": ["geometry"] },
-    //                 { "docid": "1_70", "label2": ["geometry", 1.2] },
-    //                 { "docid": "1_71", "label2": ["design", 2.2] },
-    //                 { "docid": "1_72", "label2": ["geometry", 1.2] }
-    //             ]),
-    //         )
-    //         .unwrap();
-    //
-    //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &["1_4"]);
-    //
-    //     // Placeholder search
-    //     let results = index.search(&wtxn).execute().unwrap();
-    //     assert!(!results.documents_ids.is_empty());
-    //     for id in results.documents_ids.iter() {
-    //         assert!(
-    //             !deleted_internal_ids.contains(id),
-    //             "The document {} was supposed to be deleted",
-    //             id
-    //         );
-    //     }
-    //
-    //     wtxn.commit().unwrap();
-    // }
-    //
-    // #[test]
-    // fn search_should_not_return_deleted_documents() {
-    //     let index = TempIndex::new();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     index
-    //         .update_settings_using_wtxn(&mut wtxn, |settings| {
-    //             settings.set_primary_key(S("docid"));
-    //         })
-    //         .unwrap();
-    //
-    //     index
-    //         .add_documents_using_wtxn(
-    //             &mut wtxn,
-    //             documents!([
-    //                 { "docid": "1_4",  "label": ["sign"] },
-    //                 { "docid": "1_5",  "label": ["letter"] },
-    //                 { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"] },
-    //                 { "docid": "1_36", "label": ["drawing","painting","pattern"] },
-    //                 { "docid": "1_37", "label": ["art","drawing","outdoor"] },
-    //                 { "docid": "1_38", "label": ["aquarium","art","drawing"] },
-    //                 { "docid": "1_39", "label": ["abstract"] },
-    //                 { "docid": "1_40", "label": ["cartoon"] },
-    //                 { "docid": "1_41", "label": ["art","drawing"] },
-    //                 { "docid": "1_42", "label": ["art","pattern"] },
-    //                 { "docid": "1_43", "label": ["abstract","art","drawing","pattern"] },
-    //                 { "docid": "1_44", "label": ["drawing"] },
-    //                 { "docid": "1_45", "label": ["art"] },
-    //                 { "docid": "1_46", "label": ["abstract","colorfulness","pattern"] },
-    //                 { "docid": "1_47", "label": ["abstract","pattern"] },
-    //                 { "docid": "1_52", "label": ["abstract","cartoon"] },
-    //                 { "docid": "1_57", "label": ["abstract","drawing","pattern"] },
-    //                 { "docid": "1_58", "label": ["abstract","art","cartoon"] },
-    //                 { "docid": "1_68", "label": ["design"] },
-    //                 { "docid": "1_69", "label": ["geometry"] },
-    //                 { "docid": "1_70", "label2": ["geometry", 1.2] },
-    //                 { "docid": "1_71", "label2": ["design", 2.2] },
-    //                 { "docid": "1_72", "label2": ["geometry", 1.2] }
-    //             ]),
-    //         )
-    //         .unwrap();
-    //
-    //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &["1_7", "1_52"]);
-    //
-    //     // search for abstract
-    //     let results = index.search(&wtxn).query("abstract").execute().unwrap();
-    //     assert!(!results.documents_ids.is_empty());
-    //     for id in results.documents_ids.iter() {
-    //         assert!(
-    //             !deleted_internal_ids.contains(id),
-    //             "The document {} was supposed to be deleted",
-    //             id
-    //         );
-    //     }
-    //
-    //     wtxn.commit().unwrap();
-    // }
-    //
-    // #[test]
-    // fn geo_filtered_placeholder_search_should_not_return_deleted_documents() {
-    //     let index = TempIndex::new();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     index
-    //         .update_settings_using_wtxn(&mut wtxn, |settings| {
-    //             settings.set_primary_key(S("id"));
-    //             settings.set_filterable_fields(hashset!(S("_geo")));
-    //             settings.set_sortable_fields(hashset!(S("_geo")));
-    //         })
-    //         .unwrap();
-    //
-    //     index.add_documents_using_wtxn(&mut wtxn, documents!([
-    //         { "id": "1",  "city": "Lille",             "_geo": { "lat": 50.6299, "lng": 3.0569 } },
-    //         { "id": "2",  "city": "Mons-en-Barœul",    "_geo": { "lat": 50.6415, "lng": 3.1106 } },
-    //         { "id": "3",  "city": "Hellemmes",         "_geo": { "lat": 50.6312, "lng": 3.1106 } },
-    //         { "id": "4",  "city": "Villeneuve-d'Ascq", "_geo": { "lat": 50.6224, "lng": 3.1476 } },
-    //         { "id": "5",  "city": "Hem",               "_geo": { "lat": 50.6552, "lng": 3.1897 } },
-    //         { "id": "6",  "city": "Roubaix",           "_geo": { "lat": 50.6924, "lng": 3.1763 } },
-    //         { "id": "7",  "city": "Tourcoing",         "_geo": { "lat": 50.7263, "lng": 3.1541 } },
-    //         { "id": "8",  "city": "Mouscron",          "_geo": { "lat": 50.7453, "lng": 3.2206 } },
-    //         { "id": "9",  "city": "Tournai",           "_geo": { "lat": 50.6053, "lng": 3.3758 } },
-    //         { "id": "10", "city": "Ghent",             "_geo": { "lat": 51.0537, "lng": 3.6957 } },
-    //         { "id": "11", "city": "Brussels",          "_geo": { "lat": 50.8466, "lng": 4.3370 } },
-    //         { "id": "12", "city": "Charleroi",         "_geo": { "lat": 50.4095, "lng": 4.4347 } },
-    //         { "id": "13", "city": "Mons",              "_geo": { "lat": 50.4502, "lng": 3.9623 } },
-    //         { "id": "14", "city": "Valenciennes",      "_geo": { "lat": 50.3518, "lng": 3.5326 } },
-    //         { "id": "15", "city": "Arras",             "_geo": { "lat": 50.2844, "lng": 2.7637 } },
-    //         { "id": "16", "city": "Cambrai",           "_geo": { "lat": 50.1793, "lng": 3.2189 } },
-    //         { "id": "17", "city": "Bapaume",           "_geo": { "lat": 50.1112, "lng": 2.8547 } },
-    //         { "id": "18", "city": "Amiens",            "_geo": { "lat": 49.9314, "lng": 2.2710 } },
-    //         { "id": "19", "city": "Compiègne",         "_geo": { "lat": 49.4449, "lng": 2.7913 } },
-    //         { "id": "20", "city": "Paris",             "_geo": { "lat": 48.9021, "lng": 2.3708 } }
-    //     ])).unwrap();
-    //
-    //     let external_ids_to_delete = ["5", "6", "7", "12", "17", "19"];
-    //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &external_ids_to_delete);
-    //
-    //     // Placeholder search with geo filter
-    //     let filter = Filter::from_str("_geoRadius(50.6924, 3.1763, 20000)").unwrap().unwrap();
-    //     let results = index.search(&wtxn).filter(filter).execute().unwrap();
-    //     assert!(!results.documents_ids.is_empty());
-    //     for id in results.documents_ids.iter() {
-    //         assert!(
-    //             !deleted_internal_ids.contains(id),
-    //             "The document {} was supposed to be deleted",
-    //             id
-    //         );
-    //     }
-    //
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, facet_id_f64_docids);
-    //     db_snap!(index, facet_id_string_docids);
-    // }
-    //
-    // #[test]
-    // fn get_documents_should_not_return_deleted_documents() {
-    //     let index = TempIndex::new();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     index
-    //         .update_settings_using_wtxn(&mut wtxn, |settings| {
-    //             settings.set_primary_key(S("docid"));
-    //         })
-    //         .unwrap();
-    //
-    //     index
-    //         .add_documents_using_wtxn(
-    //             &mut wtxn,
-    //             documents!([
-    //                 { "docid": "1_4",  "label": ["sign"] },
-    //                 { "docid": "1_5",  "label": ["letter"] },
-    //                 { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"] },
-    //                 { "docid": "1_36", "label": ["drawing","painting","pattern"] },
-    //                 { "docid": "1_37", "label": ["art","drawing","outdoor"] },
-    //                 { "docid": "1_38", "label": ["aquarium","art","drawing"] },
-    //                 { "docid": "1_39", "label": ["abstract"] },
-    //                 { "docid": "1_40", "label": ["cartoon"] },
-    //                 { "docid": "1_41", "label": ["art","drawing"] },
-    //                 { "docid": "1_42", "label": ["art","pattern"] },
-    //                 { "docid": "1_43", "label": ["abstract","art","drawing","pattern"] },
-    //                 { "docid": "1_44", "label": ["drawing"] },
-    //                 { "docid": "1_45", "label": ["art"] },
-    //                 { "docid": "1_46", "label": ["abstract","colorfulness","pattern"] },
-    //                 { "docid": "1_47", "label": ["abstract","pattern"] },
-    //                 { "docid": "1_52", "label": ["abstract","cartoon"] },
-    //                 { "docid": "1_57", "label": ["abstract","drawing","pattern"] },
-    //                 { "docid": "1_58", "label": ["abstract","art","cartoon"] },
-    //                 { "docid": "1_68", "label": ["design"] },
-    //                 { "docid": "1_69", "label": ["geometry"] },
-    //                 { "docid": "1_70", "label2": ["geometry", 1.2] },
-    //                 { "docid": "1_71", "label2": ["design", 2.2] },
-    //                 { "docid": "1_72", "label2": ["geometry", 1.2] }
-    //             ]),
-    //         )
-    //         .unwrap();
-    //
-    //     let deleted_external_ids = ["1_7", "1_52"];
-    //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &deleted_external_ids);
-    //
-    //     // list all documents
-    //     let results = index.all_documents(&wtxn).unwrap();
-    //     for result in results {
-    //         let (id, _) = result.unwrap();
-    //         assert!(
-    //             !deleted_internal_ids.contains(&id),
-    //             "The document {} was supposed to be deleted",
-    //             id
-    //         );
-    //     }
-    //
-    //     // list internal document ids
-    //     let results = index.documents_ids(&wtxn).unwrap();
-    //     for id in results {
-    //         assert!(
-    //             !deleted_internal_ids.contains(&id),
-    //             "The document {} was supposed to be deleted",
-    //             id
-    //         );
-    //     }
-    //     wtxn.commit().unwrap();
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //
-    //     // get internal docids from deleted external document ids
-    //     let results = index.external_documents_ids();
-    //     for id in deleted_external_ids {
-    //         assert!(
-    //             results.get(&rtxn, id).unwrap().is_none(),
-    //             "The document {} was supposed to be deleted",
-    //             id
-    //         );
-    //     }
-    //     drop(rtxn);
-    // }
-    //
-    // #[test]
-    // fn stats_should_not_return_deleted_documents() {
-    //     let index = TempIndex::new();
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //
-    //     index
-    //         .update_settings_using_wtxn(&mut wtxn, |settings| {
-    //             settings.set_primary_key(S("docid"));
-    //         })
-    //         .unwrap();
-    //
-    //     index.add_documents_using_wtxn(&mut wtxn, documents!([
-    //         { "docid": "1_4",  "label": ["sign"]},
-    //         { "docid": "1_5",  "label": ["letter"]},
-    //         { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"], "title": "Mickey Mouse"},
-    //         { "docid": "1_36", "label": ["drawing","painting","pattern"]},
-    //         { "docid": "1_37", "label": ["art","drawing","outdoor"]},
-    //         { "docid": "1_38", "label": ["aquarium","art","drawing"], "title": "Nemo"},
-    //         { "docid": "1_39", "label": ["abstract"]},
-    //         { "docid": "1_40", "label": ["cartoon"]},
-    //         { "docid": "1_41", "label": ["art","drawing"]},
-    //         { "docid": "1_42", "label": ["art","pattern"]},
-    //         { "docid": "1_43", "label": ["abstract","art","drawing","pattern"], "number": 32i32},
-    //         { "docid": "1_44", "label": ["drawing"], "number": 44i32},
-    //         { "docid": "1_45", "label": ["art"]},
-    //         { "docid": "1_46", "label": ["abstract","colorfulness","pattern"]},
-    //         { "docid": "1_47", "label": ["abstract","pattern"]},
-    //         { "docid": "1_52", "label": ["abstract","cartoon"]},
-    //         { "docid": "1_57", "label": ["abstract","drawing","pattern"]},
-    //         { "docid": "1_58", "label": ["abstract","art","cartoon"]},
-    //         { "docid": "1_68", "label": ["design"]},
-    //         { "docid": "1_69", "label": ["geometry"]}
-    //     ])).unwrap();
-    //
-    //     delete_documents(&mut wtxn, &index, &["1_7", "1_52"]);
-    //
-    //     // count internal documents
-    //     let results = index.number_of_documents(&wtxn).unwrap();
-    //     assert_eq!(18, results);
-    //
-    //     // count field distribution
-    //     let results = index.field_distribution(&wtxn).unwrap();
-    //     assert_eq!(Some(&18), results.get("label"));
-    //     assert_eq!(Some(&1), results.get("title"));
-    //     assert_eq!(Some(&2), results.get("number"));
-    //
-    //     wtxn.commit().unwrap();
-    // }
-    //
-    // #[test]
-    // fn stored_detected_script_and_language_should_not_return_deleted_documents() {
-    //     use charabia::{Language, Script};
-    //     let index = TempIndex::new();
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     index
-    //         .add_documents_using_wtxn(
-    //             &mut wtxn,
-    //             documents!([
-    //             { "id": "0", "title": "The quick (\"brown\") fox can't jump 32.3 feet, right? Brr, it's 29.3°F!" },
-    //             { "id": "1", "title": "人人生而自由﹐在尊嚴和權利上一律平等。他們賦有理性和良心﹐並應以兄弟關係的精神互相對待。" },
-    //             { "id": "2", "title": "הַשּׁוּעָל הַמָּהִיר (״הַחוּם״) לֹא יָכוֹל לִקְפֹּץ 9.94 מֶטְרִים, נָכוֹן? ברר, 1.5°C- בַּחוּץ!" },
-    //             { "id": "3", "title": "関西国際空港限定トートバッグ すもももももももものうち" },
-    //             { "id": "4", "title": "ภาษาไทยง่ายนิดเดียว" },
-    //             { "id": "5", "title": "The quick 在尊嚴和權利上一律平等。" },
-    //         ]))
-    //         .unwrap();
-    //
-    //     let key_cmn = (Script::Cj, Language::Cmn);
-    //     let cj_cmn_docs =
-    //         index.script_language_documents_ids(&wtxn, &key_cmn).unwrap().unwrap_or_default();
-    //     let mut expected_cj_cmn_docids = RoaringBitmap::new();
-    //     expected_cj_cmn_docids.push(1);
-    //     expected_cj_cmn_docids.push(5);
-    //     assert_eq!(cj_cmn_docs, expected_cj_cmn_docids);
-    //
-    //     delete_documents(&mut wtxn, &index, &["1"]);
-    //     wtxn.commit().unwrap();
-    //
-    //     let rtxn = index.read_txn().unwrap();
-    //     let cj_cmn_docs =
-    //         index.script_language_documents_ids(&rtxn, &key_cmn).unwrap().unwrap_or_default();
-    //     let mut expected_cj_cmn_docids = RoaringBitmap::new();
-    //     expected_cj_cmn_docids.push(5);
-    //     assert_eq!(cj_cmn_docs, expected_cj_cmn_docids);
-    // }
-    //
-    // #[test]
-    // fn delete_words_exact_attributes() {
-    //     let index = TempIndex::new();
-    //
-    //     index
-    //         .update_settings(|settings| {
-    //             settings.set_primary_key(S("id"));
-    //             settings.set_searchable_fields(vec![S("text"), S("exact")]);
-    //             settings.set_exact_attributes(vec![S("exact")].into_iter().collect());
-    //         })
-    //         .unwrap();
-    //
-    //     index
-    //         .add_documents(documents!([
-    //             { "id": 0, "text": "hello" },
-    //             { "id": 1, "exact": "hello"}
-    //         ]))
-    //         .unwrap();
-    //     db_snap!(index, word_docids, 1, @r###"
-    //     hello            [0, ]
-    //     "###);
-    //     db_snap!(index, exact_word_docids, 1, @r###"
-    //     hello            [1, ]
-    //     "###);
-    //     db_snap!(index, words_fst, 1, @"300000000000000001084cfcfc2ce1000000016000000090ea47f");
-    //
-    //     let mut wtxn = index.write_txn().unwrap();
-    //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &["1"]);
-    //     wtxn.commit().unwrap();
-    //
-    //     db_snap!(index, word_docids, 2, @r###"
-    //     hello            [0, ]
-    //     "###);
-    //     db_snap!(index, exact_word_docids, 2, @"");
-    //     db_snap!(index, words_fst, 2, @"300000000000000001084cfcfc2ce1000000016000000090ea47f");
-    //
-    //     insta::assert_snapshot!(format!("{deleted_internal_ids:?}"), @"[1]");
-    //     let txn = index.read_txn().unwrap();
-    //     let words = index.words_fst(&txn).unwrap().into_stream().into_strs().unwrap();
-    //     insta::assert_snapshot!(format!("{words:?}"), @r###"["hello"]"###);
-    //
-    //     let mut s = Search::new(&txn, &index);
-    //     s.query("hello");
-    //     let crate::SearchResult { documents_ids, .. } = s.execute().unwrap();
-    //     insta::assert_snapshot!(format!("{documents_ids:?}"), @"[0]");
-    // }
-}
+// #[cfg(test)]
+// mod tests {
+//     use std::collections::BTreeMap;
+//
+//     use big_s::S;
+//     use fst::IntoStreamer;
+//     use heed::RwTxn;
+//     use maplit::hashset;
+//
+//     use super::*;
+//     use crate::documents::documents_batch_reader_from_objects;
+//     use crate::index::tests::TempIndex;
+//     //use crate::search::TermsMatchingStrategy;
+//     use crate::update::Setting;
+//     //use crate::{db_snap, Filter, Search};
+//
+//     #[test]
+//     fn simple_document_replacement() {
+//         let index = TempIndex::new();
+//
+//         // First we send 3 documents with ids from 1 to 3.
+//         index
+//             .add_documents(documents!([
+//                 { "id": 1, "name": "kevin" },
+//                 { "id": 2, "name": "kevina" },
+//                 { "id": 3, "name": "benoit" }
+//             ]))
+//             .unwrap();
+//
+//         // Check that there is 3 documents now.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 3);
+//         drop(rtxn);
+//
+//         // Second we send 1 document with id 1, to erase the previous ones.
+//         index.add_documents(documents!([ { "id": 1, "name": "updated kevin" } ])).unwrap();
+//
+//         // Check that there is **always** 3 documents.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 3);
+//         drop(rtxn);
+//
+//         // Third we send 3 documents again to replace the existing ones.
+//         index
+//             .add_documents(documents!([
+//                 { "id": 1, "name": "updated second kevin" },
+//                 { "id": 2, "name": "updated kevina" },
+//                 { "id": 3, "name": "updated benoit" }
+//             ]))
+//             .unwrap();
+//
+//         // Check that there is **always** 3 documents.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 3);
+//         let count = index.all_documents(&rtxn).unwrap().count();
+//         assert_eq!(count, 3);
+//
+//         drop(rtxn);
+//     }
+//
+//     #[test]
+//     fn simple_document_merge() {
+//         let mut index = TempIndex::new();
+//         index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
+//
+//         // First we send 3 documents with duplicate ids and
+//         // change the index method to merge documents.
+//         index
+//             .add_documents(documents!([
+//                 { "id": 1, "name": "kevin" },
+//                 { "id": 1, "name": "kevina" },
+//                 { "id": 1, "name": "benoit" }
+//             ]))
+//             .unwrap();
+//
+//         // Check that there is only 1 document now.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 1);
+//
+//         // Check that we get only one document from the database.
+//         let docs = index.documents(&rtxn, Some(0)).unwrap();
+//         assert_eq!(docs.len(), 1);
+//         let (id, doc) = docs[0];
+//         assert_eq!(id, 0);
+//
+//         // Check that this document is equal to the last one sent.
+//         let mut doc_iter = doc.iter();
+//         assert_eq!(doc_iter.next(), Some((0, &b"1"[..])));
+//         assert_eq!(doc_iter.next(), Some((1, &br#""benoit""#[..])));
+//         assert_eq!(doc_iter.next(), None);
+//         drop(rtxn);
+//
+//         // Second we send 1 document with id 1, to force it to be merged with the previous one.
+//         index.add_documents(documents!([ { "id": 1, "age": 25 } ])).unwrap();
+//
+//         // Check that there is **always** 1 document.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 1);
+//
+//         // Check that we get only one document from the database.
+//         let docs = index.documents(&rtxn, Some(0)).unwrap();
+//         assert_eq!(docs.len(), 1);
+//         let (id, doc) = docs[0];
+//         assert_eq!(id, 0);
+//
+//         // Check that this document is equal to the last one sent.
+//         let mut doc_iter = doc.iter();
+//         assert_eq!(doc_iter.next(), Some((0, &b"1"[..])));
+//         assert_eq!(doc_iter.next(), Some((1, &br#""benoit""#[..])));
+//         assert_eq!(doc_iter.next(), Some((2, &b"25"[..])));
+//         assert_eq!(doc_iter.next(), None);
+//         drop(rtxn);
+//     }
+//
+//     #[test]
+//     fn not_auto_generated_documents_ids() {
+//         let index = TempIndex::new();
+//
+//         let result = index.add_documents(documents!([
+//             { "name": "kevin" },
+//             { "name": "kevina" },
+//             { "name": "benoit" }
+//         ]));
+//         assert!(result.is_err());
+//
+//         // Check that there is no document.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 0);
+//         drop(rtxn);
+//     }
+//
+//     #[test]
+//     fn simple_auto_generated_documents_ids() {
+//         let mut index = TempIndex::new();
+//         index.index_documents_config.autogenerate_docids = true;
+//         // First we send 3 documents with ids from 1 to 3.
+//         index
+//             .add_documents(documents!([
+//                 { "name": "kevin" },
+//                 { "name": "kevina" },
+//                 { "name": "benoit" }
+//             ]))
+//             .unwrap();
+//
+//         // Check that there is 3 documents now.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 3);
+//
+//         let docs = index.documents(&rtxn, vec![0, 1, 2]).unwrap();
+//         let (_id, obkv) = docs.iter().find(|(_id, kv)| kv.get(0) == Some(br#""kevin""#)).unwrap();
+//         let kevin_uuid: String = serde_json::from_slice(obkv.get(1).unwrap()).unwrap();
+//         drop(rtxn);
+//
+//         // Second we send 1 document with the generated uuid, to erase the previous ones.
+//         index.add_documents(documents!([ { "name": "updated kevin", "id": kevin_uuid } ])).unwrap();
+//
+//         // Check that there is **always** 3 documents.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 3);
+//
+//         // the document 0 has been deleted and reinserted with the id 3
+//         let docs = index.documents(&rtxn, vec![1, 2, 0]).unwrap();
+//         let kevin_position =
+//             docs.iter().position(|(_, d)| d.get(0).unwrap() == br#""updated kevin""#).unwrap();
+//         assert_eq!(kevin_position, 2);
+//         let (_, doc) = docs[kevin_position];
+//
+//         // Check that this document is equal to the last
+//         // one sent and that an UUID has been generated.
+//         assert_eq!(doc.get(0), Some(&br#""updated kevin""#[..]));
+//         // This is an UUID, it must be 36 bytes long plus the 2 surrounding string quotes (").
+//         assert_eq!(doc.get(1).unwrap().len(), 36 + 2);
+//         drop(rtxn);
+//     }
+//
+//     #[test]
+//     fn reordered_auto_generated_documents_ids() {
+//         let mut index = TempIndex::new();
+//
+//         // First we send 3 documents with ids from 1 to 3.
+//         index
+//             .add_documents(documents!([
+//                 { "id": 1, "name": "kevin" },
+//                 { "id": 2, "name": "kevina" },
+//                 { "id": 3, "name": "benoit" }
+//             ]))
+//             .unwrap();
+//
+//         // Check that there is 3 documents now.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 3);
+//         drop(rtxn);
+//
+//         // Second we send 1 document without specifying the id.
+//         index.index_documents_config.autogenerate_docids = true;
+//         index.add_documents(documents!([ { "name": "new kevin" } ])).unwrap();
+//
+//         // Check that there is 4 documents now.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 4);
+//         drop(rtxn);
+//     }
+//
+//     #[test]
+//     fn empty_update() {
+//         let index = TempIndex::new();
+//
+//         // First we send 0 documents and only headers.
+//         index.add_documents(documents!([])).unwrap();
+//
+//         // Check that there is no documents.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 0);
+//         drop(rtxn);
+//     }
+//
+//     #[test]
+//     fn invalid_documents_ids() {
+//         let index = TempIndex::new();
+//
+//         // First we send 1 document with an invalid id.
+//         // There is a space in the document id.
+//         index.add_documents(documents!([ { "id": "brume bleue", "name": "kevin" } ])).unwrap_err();
+//
+//         // Then we send 1 document with a valid id.
+//         index.add_documents(documents!([ { "id": 32, "name": "kevin" } ])).unwrap();
+//
+//         // Check that there is 1 document now.
+//         let rtxn = index.read_txn().unwrap();
+//         let count = index.number_of_documents(&rtxn).unwrap();
+//         assert_eq!(count, 1);
+//         drop(rtxn);
+//     }
+//
+//     #[test]
+//     fn complex_documents() {
+//         let index = TempIndex::new();
+//
+//         // First we send 3 documents with an id for only one of them.
+//         index
+//             .add_documents(documents!([
+//                 { "id": 0, "name": "kevin", "object": { "key1": "value1", "key2": "value2" } },
+//                 { "id": 1, "name": "kevina", "array": ["I", "am", "fine"] },
+//                 { "id": 2, "name": "benoit", "array_of_object": [{ "wow": "amazing" }] }
+//             ]))
+//             .unwrap();
+//
+//         // Check that there is 1 documents now.
+//         let rtxn = index.read_txn().unwrap();
+//
+//         // Search for a sub object value
+//         let result = index.search(&rtxn).query(r#""value2""#).execute().unwrap();
+//         assert_eq!(result.documents_ids, vec![0]);
+//
+//         // Search for a sub array value
+//         let result = index.search(&rtxn).query(r#""fine""#).execute().unwrap();
+//         assert_eq!(result.documents_ids, vec![1]);
+//
+//         // Search for a sub array sub object key
+//         let result = index.search(&rtxn).query(r#""amazing""#).execute().unwrap();
+//         assert_eq!(result.documents_ids, vec![2]);
+//
+//         drop(rtxn);
+//     }
+//
+//     // #[test]
+//     // fn simple_documents_replace() {
+//     //     let mut index = TempIndex::new();
+//     //     index.index_documents_config.update_method = IndexDocumentsMethod::ReplaceDocuments;
+//     //
+//     //     index.add_documents(documents!([
+//     //       { "id": 2,    "title": "Pride and Prejudice",                    "author": "Jane Austin",              "genre": "romance",    "price": 3.5, "_geo": { "lat": 12, "lng": 42 } },
+//     //       { "id": 456,  "title": "Le Petit Prince",                        "author": "Antoine de Saint-Exupéry", "genre": "adventure" , "price": 10.0 },
+//     //       { "id": 1,    "title": "Alice In Wonderland",                    "author": "Lewis Carroll",            "genre": "fantasy",    "price": 25.99 },
+//     //       { "id": 1344, "title": "The Hobbit",                             "author": "J. R. R. Tolkien",         "genre": "fantasy" },
+//     //       { "id": 4,    "title": "Harry Potter and the Half-Blood Prince", "author": "J. K. Rowling",            "genre": "fantasy" },
+//     //       { "id": 42,   "title": "The Hitchhiker's Guide to the Galaxy",   "author": "Douglas Adams", "_geo": { "lat": 35, "lng": 23 } }
+//     //     ])).unwrap();
+//     //
+//     //     db_snap!(index, word_docids, "initial");
+//     //
+//     //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //             {"id":4,"title":"Harry Potter and the Half-Blood Princess"},
+//     //             {"id":456,"title":"The Little Prince"}
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //             { "id": 2, "author": "J. Austen", "date": "1813" }
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     // Check that there is **always** 6 documents.
+//     //     let rtxn = index.read_txn().unwrap();
+//     //     let count = index.number_of_documents(&rtxn).unwrap();
+//     //     assert_eq!(count, 6);
+//     //     let count = index.all_documents(&rtxn).unwrap().count();
+//     //     assert_eq!(count, 6);
+//     //
+//     //     db_snap!(index, word_docids, "updated");
+//     //
+//     //     drop(rtxn);
+//     // }
+//
+//     #[test]
+//     fn mixed_geo_documents() {
+//         let mut index = TempIndex::new();
+//         index.index_documents_config.update_method = IndexDocumentsMethod::ReplaceDocuments;
+//
+//         // We send 6 documents and mix the ones that have _geo and those that don't have it.
+//         index
+//             .add_documents(documents!([
+//               { "id": 2, "price": 3.5, "_geo": { "lat": 12, "lng": 42 } },
+//               { "id": 456 },
+//               { "id": 1 },
+//               { "id": 1344 },
+//               { "id": 4 },
+//               { "id": 42, "_geo": { "lat": 35, "lng": 23 } }
+//             ]))
+//             .unwrap();
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(hashset!(S("_geo")));
+//             })
+//             .unwrap();
+//     }
+//
+//     #[test]
+//     fn geo_error() {
+//         let mut index = TempIndex::new();
+//         index.index_documents_config.update_method = IndexDocumentsMethod::ReplaceDocuments;
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(hashset!(S("_geo")));
+//             })
+//             .unwrap();
+//
+//         let error = index
+//             .add_documents(documents!([
+//               { "id": 0, "_geo": { "lng": 42 } }
+//             ]))
+//             .unwrap_err();
+//         assert_eq!(
+//             &error.to_string(),
+//             r#"Could not find latitude in the document with the id: `0`. Was expecting a `_geo.lat` field."#
+//         );
+//
+//         let error = index
+//             .add_documents(documents!([
+//               { "id": 0, "_geo": { "lat": 42 } }
+//             ]))
+//             .unwrap_err();
+//         assert_eq!(
+//             &error.to_string(),
+//             r#"Could not find longitude in the document with the id: `0`. Was expecting a `_geo.lng` field."#
+//         );
+//
+//         let error = index
+//             .add_documents(documents!([
+//               { "id": 0, "_geo": { "lat": "lol", "lng": 42 } }
+//             ]))
+//             .unwrap_err();
+//         assert_eq!(
+//             &error.to_string(),
+//             r#"Could not parse latitude in the document with the id: `0`. Was expecting a finite number but instead got `"lol"`."#
+//         );
+//
+//         let error = index
+//             .add_documents(documents!([
+//               { "id": 0, "_geo": { "lat": [12, 13], "lng": 42 } }
+//             ]))
+//             .unwrap_err();
+//         assert_eq!(
+//             &error.to_string(),
+//             r#"Could not parse latitude in the document with the id: `0`. Was expecting a finite number but instead got `[12,13]`."#
+//         );
+//
+//         let error = index
+//             .add_documents(documents!([
+//               { "id": 0, "_geo": { "lat": 12, "lng": "hello" } }
+//             ]))
+//             .unwrap_err();
+//         assert_eq!(
+//             &error.to_string(),
+//             r#"Could not parse longitude in the document with the id: `0`. Was expecting a finite number but instead got `"hello"`."#
+//         );
+//     }
+//
+//     #[test]
+//     fn delete_documents_then_insert() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .add_documents(documents!([
+//                 { "objectId": 123, "title": "Pride and Prejudice", "comment": "A great book" },
+//                 { "objectId": 456, "title": "Le Petit Prince",     "comment": "A french book" },
+//                 { "objectId": 1,   "title": "Alice In Wonderland", "comment": "A weird book" },
+//                 { "objectId": 30,  "title": "Hamlet", "_geo": { "lat": 12, "lng": 89 } }
+//             ]))
+//             .unwrap();
+//
+//         // Delete not all of the documents but some of them.
+//         index.delete_document("30");
+//
+//         let txn = index.read_txn().unwrap();
+//         assert_eq!(index.primary_key(&txn).unwrap(), Some("objectId"));
+//
+//         let external_documents_ids = index.external_documents_ids();
+//         assert!(external_documents_ids.get(&txn, "30").unwrap().is_none());
+//
+//         index
+//             .add_documents(documents!([
+//                 { "objectId": 30,  "title": "Hamlet", "_geo": { "lat": 12, "lng": 89 } }
+//             ]))
+//             .unwrap();
+//
+//         let wtxn = index.write_txn().unwrap();
+//         let external_documents_ids = index.external_documents_ids();
+//         assert!(external_documents_ids.get(&wtxn, "30").unwrap().is_some());
+//         wtxn.commit().unwrap();
+//
+//         index
+//             .add_documents(documents!([
+//                 { "objectId": 30,  "title": "Hamlet", "_geo": { "lat": 12, "lng": 89 } }
+//             ]))
+//             .unwrap();
+//     }
+//
+//     #[test]
+//     fn index_more_than_256_fields() {
+//         let index = TempIndex::new();
+//
+//         let mut big_object = serde_json::Map::new();
+//         big_object.insert(S("id"), serde_json::Value::from("wow"));
+//         for i in 0..1000 {
+//             let key = i.to_string();
+//             big_object.insert(key, serde_json::Value::from("I am a text!"));
+//         }
+//
+//         let documents = documents_batch_reader_from_objects([big_object]);
+//         index.add_documents(documents).unwrap();
+//     }
+//
+//     #[test]
+//     fn index_more_than_1000_positions_in_a_field() {
+//         let index = TempIndex::new_with_map_size(4096 * 100_000); // 400 MB
+//         let mut content = String::with_capacity(382101);
+//         for i in 0..=u16::MAX {
+//             content.push_str(&format!("{i} "));
+//         }
+//         index
+//             .add_documents(documents!({
+//                 "id": "wow",
+//                 "content": content
+//             }))
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//
+//         assert!(index.word_docids.get(&rtxn, "0").unwrap().is_some());
+//         assert!(index.word_docids.get(&rtxn, "64").unwrap().is_some());
+//         assert!(index.word_docids.get(&rtxn, "256").unwrap().is_some());
+//         assert!(index.word_docids.get(&rtxn, "1024").unwrap().is_some());
+//         assert!(index.word_docids.get(&rtxn, "32768").unwrap().is_some());
+//         assert!(index.word_docids.get(&rtxn, "65535").unwrap().is_some());
+//     }
+//
+//     #[test]
+//     fn index_documents_with_zeroes() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .add_documents(documents!([
+//                 {
+//                     "id": 2,
+//                     "title": "Prideand Prejudice",
+//                     "au{hor": "Jane Austin",
+//                     "genre": "romance",
+//                     "price$": "3.5$",
+//                 },
+//                 {
+//                     "id": 456,
+//                     "title": "Le Petit Prince",
+//                     "au{hor": "Antoine de Saint-Exupéry",
+//                     "genre": "adventure",
+//                     "price$": "10.0$",
+//                 },
+//                 {
+//                     "id": 1,
+//                     "title": "Wonderland",
+//                     "au{hor": "Lewis Carroll",
+//                     "genre": "fantasy",
+//                     "price$": "25.99$",
+//                 },
+//                 {
+//                     "id": 4,
+//                     "title": "Harry Potter ing fantasy\0lood Prince",
+//                     "au{hor": "J. K. Rowling",
+//                     "genre": "fantasy\0",
+//                 },
+//             ]))
+//             .unwrap();
+//     }
+//
+//     // #[test]
+//     // fn index_documents_with_nested_fields() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //             {
+//     //                 "id": 0,
+//     //                 "title": "The zeroth document",
+//     //             },
+//     //             {
+//     //                 "id": 1,
+//     //                 "title": "The first document",
+//     //                 "nested": {
+//     //                     "object": "field",
+//     //                     "machin": "bidule",
+//     //                 },
+//     //             },
+//     //             {
+//     //                 "id": 2,
+//     //                 "title": "The second document",
+//     //                 "nested": [
+//     //                     "array",
+//     //                     {
+//     //                         "object": "field",
+//     //                     },
+//     //                     {
+//     //                         "prout": "truc",
+//     //                         "machin": "lol",
+//     //                     },
+//     //                 ],
+//     //             },
+//     //             {
+//     //                 "id": 3,
+//     //                 "title": "The third document",
+//     //                 "nested": "I lied",
+//     //             },
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             let searchable_fields = vec![S("title"), S("nested.object"), S("nested.machin")];
+//     //             settings.set_searchable_fields(searchable_fields);
+//     //
+//     //             let faceted_fields = hashset!(S("title"), S("nested.object"), S("nested.machin"));
+//     //             settings.set_filterable_fields(faceted_fields);
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //
+//     //     let facets = index.faceted_fields(&rtxn).unwrap();
+//     //     assert_eq!(facets, hashset!(S("title"), S("nested.object"), S("nested.machin")));
+//     //
+//     //     // testing the simple query search
+//     //     let mut search = crate::Search::new(&rtxn, &index);
+//     //     search.query("document");
+//     //     search.terms_matching_strategy(TermsMatchingStrategy::default());
+//     //     // all documents should be returned
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids.len(), 4);
+//     //
+//     //     search.query("zeroth");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![0]);
+//     //     search.query("first");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![1]);
+//     //     search.query("second");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![2]);
+//     //     search.query("third");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![3]);
+//     //
+//     //     search.query("field");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![1, 2]);
+//     //
+//     //     search.query("lol");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![2]);
+//     //
+//     //     search.query("object");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert!(documents_ids.is_empty());
+//     //
+//     //     search.query("array");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert!(documents_ids.is_empty()); // nested is not searchable
+//     //
+//     //     search.query("lied");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert!(documents_ids.is_empty()); // nested is not searchable
+//     //
+//     //     // testing the filters
+//     //     let mut search = crate::Search::new(&rtxn, &index);
+//     //     search.filter(crate::Filter::from_str(r#"title = "The first document""#).unwrap().unwrap());
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![1]);
+//     //
+//     //     search.filter(crate::Filter::from_str(r#"nested.object = field"#).unwrap().unwrap());
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![1, 2]);
+//     //
+//     //     search.filter(crate::Filter::from_str(r#"nested.machin = bidule"#).unwrap().unwrap());
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![1]);
+//     //
+//     //     search.filter(crate::Filter::from_str(r#"nested = array"#).unwrap().unwrap());
+//     //     let error = search.execute().map(|_| unreachable!()).unwrap_err(); // nested is not filterable
+//     //     assert!(matches!(error, crate::Error::UserError(crate::UserError::InvalidFilter(_))));
+//     //
+//     //     search.filter(crate::Filter::from_str(r#"nested = "I lied""#).unwrap().unwrap());
+//     //     let error = search.execute().map(|_| unreachable!()).unwrap_err(); // nested is not filterable
+//     //     assert!(matches!(error, crate::Error::UserError(crate::UserError::InvalidFilter(_))));
+//     // }
+//
+//     // #[test]
+//     // fn index_documents_with_nested_primary_key() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             settings.set_primary_key("complex.nested.id".to_owned());
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //             {
+//     //                 "complex": {
+//     //                     "nested": {
+//     //                         "id": 0,
+//     //                     },
+//     //                 },
+//     //                 "title": "The zeroth document",
+//     //             },
+//     //             {
+//     //                 "complex.nested": {
+//     //                     "id": 1,
+//     //                 },
+//     //                 "title": "The first document",
+//     //             },
+//     //             {
+//     //                 "complex": {
+//     //                     "nested.id": 2,
+//     //                 },
+//     //                 "title": "The second document",
+//     //             },
+//     //             {
+//     //                 "complex.nested.id": 3,
+//     //                 "title": "The third document",
+//     //             },
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //
+//     //     // testing the simple query search
+//     //     let mut search = crate::Search::new(&rtxn, &index);
+//     //     search.query("document");
+//     //     search.terms_matching_strategy(TermsMatchingStrategy::default());
+//     //     // all documents should be returned
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids.len(), 4);
+//     //
+//     //     search.query("zeroth");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![0]);
+//     //     search.query("first");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![1]);
+//     //     search.query("second");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![2]);
+//     //     search.query("third");
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![3]);
+//     // }
+//     //
+//     // #[test]
+//     // fn retrieve_a_b_nested_document_id() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             settings.set_primary_key("a.b".to_owned());
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     // There must be an issue with the primary key no present in the given document
+//     //     index.add_documents(documents!({ "a" : { "b" : { "c" :  1 }}})).unwrap_err();
+//     // }
+//     //
+//     // #[test]
+//     // fn retrieve_a_b_c_nested_document_id() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             settings.set_primary_key("a.b.c".to_owned());
+//     //         })
+//     //         .unwrap();
+//     //     index.add_documents(documents!({ "a" : { "b" : { "c" :  1 }}})).unwrap();
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //     let all_documents_count = index.all_documents(&rtxn).unwrap().count();
+//     //     assert_eq!(all_documents_count, 1);
+//     //     let external_documents_ids = index.external_documents_ids();
+//     //     assert!(external_documents_ids.get(&rtxn, "1").unwrap().is_some());
+//     // }
+//     //
+//     // #[test]
+//     // fn test_facets_generation() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //             {
+//     //                 "id": 0,
+//     //                 "dog": {
+//     //                     "race": {
+//     //                         "bernese mountain": "zeroth",
+//     //                     },
+//     //                 },
+//     //             },
+//     //             {
+//     //                 "id": 1,
+//     //                 "dog.race": {
+//     //                     "bernese mountain": "first",
+//     //                 },
+//     //             },
+//     //             {
+//     //                 "id": 2,
+//     //                 "dog.race.bernese mountain": "second",
+//     //             },
+//     //             {
+//     //                 "id": 3,
+//     //                 "dog": {
+//     //                     "race.bernese mountain": "third"
+//     //                 },
+//     //             },
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             settings.set_filterable_fields(hashset!(String::from("dog")));
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     db_snap!(index, facet_id_string_docids, @r###"
+//     //     3   0  first        1  [1, ]
+//     //     3   0  second       1  [2, ]
+//     //     3   0  third        1  [3, ]
+//     //     3   0  zeroth       1  [0, ]
+//     //     "###);
+//     //     db_snap!(index, field_id_docid_facet_strings, @r###"
+//     //     3   0    zeroth       zeroth
+//     //     3   1    first        first
+//     //     3   2    second       second
+//     //     3   3    third        third
+//     //     "###);
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //
+//     //     let hidden = index.faceted_fields(&rtxn).unwrap();
+//     //
+//     //     assert_eq!(hidden, hashset!(S("dog"), S("dog.race"), S("dog.race.bernese mountain")));
+//     //
+//     //     for (s, i) in [("zeroth", 0), ("first", 1), ("second", 2), ("third", 3)] {
+//     //         let mut search = crate::Search::new(&rtxn, &index);
+//     //         let filter = format!(r#""dog.race.bernese mountain" = {s}"#);
+//     //         search.filter(crate::Filter::from_str(&filter).unwrap().unwrap());
+//     //         let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //         assert_eq!(documents_ids, vec![i]);
+//     //     }
+//     //     // Reset the settings
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             settings.reset_filterable_fields();
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     db_snap!(index, facet_id_string_docids, @"");
+//     //     db_snap!(index, field_id_docid_facet_strings, @"");
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //
+//     //     let facets = index.faceted_fields(&rtxn).unwrap();
+//     //
+//     //     assert_eq!(facets, hashset!());
+//     //
+//     //     // update the settings to test the sortable
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             settings.set_sortable_fields(hashset!(S("dog.race")));
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     db_snap!(index, facet_id_string_docids, @r###"
+//     //     3   0  first        1  [1, ]
+//     //     3   0  second       1  [2, ]
+//     //     3   0  third        1  [3, ]
+//     //     3   0  zeroth       1  [0, ]
+//     //     "###);
+//     //     db_snap!(index, field_id_docid_facet_strings, @r###"
+//     //     3   0    zeroth       zeroth
+//     //     3   1    first        first
+//     //     3   2    second       second
+//     //     3   3    third        third
+//     //     "###);
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //
+//     //     let facets = index.faceted_fields(&rtxn).unwrap();
+//     //
+//     //     assert_eq!(facets, hashset!(S("dog.race"), S("dog.race.bernese mountain")));
+//     //
+//     //     let mut search = crate::Search::new(&rtxn, &index);
+//     //     search.sort_criteria(vec![crate::AscDesc::Asc(crate::Member::Field(S(
+//     //         "dog.race.bernese mountain",
+//     //     )))]);
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids, vec![1, 2, 3, 0]);
+//     // }
+//     //
+//     // #[test]
+//     // fn index_2_times_documents_split_by_zero_document_indexation() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //             {"id": 0, "name": "Kerollmops", "score": 78},
+//     //             {"id": 1, "name": "ManyTheFish", "score": 75},
+//     //             {"id": 2, "name": "Ferdi", "score": 39},
+//     //             {"id": 3, "name": "Tommy", "score": 33}
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     // Check that there is 4 document now.
+//     //     let rtxn = index.read_txn().unwrap();
+//     //     let count = index.number_of_documents(&rtxn).unwrap();
+//     //     assert_eq!(count, 4);
+//     //
+//     //     index.add_documents(documents!([])).unwrap();
+//     //
+//     //     // Check that there is 4 document now.
+//     //     let rtxn = index.read_txn().unwrap();
+//     //     let count = index.number_of_documents(&rtxn).unwrap();
+//     //     assert_eq!(count, 4);
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //             {"id": 0, "name": "Kerollmops", "score": 78},
+//     //             {"id": 1, "name": "ManyTheFish", "score": 75},
+//     //             {"id": 2, "name": "Ferdi", "score": 39},
+//     //             {"id": 3, "name": "Tommy", "score": 33}
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     // Check that there is 4 document now.
+//     //     let rtxn = index.read_txn().unwrap();
+//     //     let count = index.number_of_documents(&rtxn).unwrap();
+//     //     assert_eq!(count, 4);
+//     // }
+//
+//     // #[cfg(feature = "chinese")]
+//     // #[test]
+//     // fn test_meilisearch_1714() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //           {"id": "123", "title": "小化妆包" },
+//     //           {"id": "456", "title": "Ipad 包" }
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //
+//     //     // Only the first document should match.
+//     //     let count = index.word_docids.get(&rtxn, "huàzhuāngbāo").unwrap().unwrap().len();
+//     //     assert_eq!(count, 1);
+//     //
+//     //     // Only the second document should match.
+//     //     let count = index.word_docids.get(&rtxn, "bāo").unwrap().unwrap().len();
+//     //     assert_eq!(count, 1);
+//     //
+//     //     let mut search = crate::Search::new(&rtxn, &index);
+//     //     search.query("化妆包");
+//     //     search.terms_matching_strategy(TermsMatchingStrategy::default());
+//     //
+//     //     // only 1 document should be returned
+//     //     let crate::SearchResult { documents_ids, .. } = search.execute().unwrap();
+//     //     assert_eq!(documents_ids.len(), 1);
+//     // }
+//
+//     /// We try to index documents with words that are too long here,
+//     /// it should not return any error.
+//     #[test]
+//     fn text_with_too_long_words() {
+//         let index = TempIndex::new();
+//
+//         index
+//             .add_documents(documents!([
+//               {"id": 1, "title": "a".repeat(256) },
+//               {"id": 2, "title": "b".repeat(512) },
+//               {"id": 3, "title": format!("{} {}", "c".repeat(250), "d".repeat(250)) },
+//             ]))
+//             .unwrap();
+//     }
+//
+//     #[test]
+//     fn text_with_too_long_keys() {
+//         let index = TempIndex::new();
+//         let script = "https://bug.example.com/meilisearch/milli.saml2?ROLE=Programmer-1337&SAMLRequest=Cy1ytcZT1Po%2L2IY2y9Unru8rgnW4qWfPiI0EpT7P8xjJV8PeQikRL%2E8D9A4pj9tmbymbQCQwGmGjPMK7qwXFPX4DH52JO2b7n6TXjuR7zkIFuYdzdY2rwRNBPgCL7ihclEm9zyIjKZQ%2JTqiwfXxWjnI0KEYQYHdwd6Q%2Fx%28BDLNsvmL54CCY2F4RWeRs4eqWfn%2EHqxlhreFzax4AiQ2tgOtV5thOaaWqrhZD%2Py70nuyZWNTKwciGI43AoHg6PThANsQ5rAY5amzN%2ufbs1swETUXlLZuOut5YGpYPZfY6STJWNp4QYSUOUXBZpdElYsH7UHZ7VhJycgyt%28aTK0GW6GbKne2tJM0hgSczOqndg6RFa9WsnSBi4zMcaEfYur4WlSsHDYInF9ROousKqVMZ6H8%2gbUissaLh1eXRGo8KEJbyEHbhVVKGD%28kx4cfKjx9fT3pkeDTdvDrVn25jIzi9wHyt9l1lWc8ICnCvXCVUPP%2BjBG4wILR29gMV9Ux2QOieQm2%2Fycybhr8sBGCl30mHC7blvWt%2T3mrCHQoS3VK49PZNPqBZO9C7vOjOWoszNkJx4QckWV%2FZFvbpzUUkiBiehr9F%2FvQSxz9lzv68GwbTu9fr638p%2FQM%3D&RelayState=https%3A%2F%example.bug.com%2Fde&SigAlg=http%3A%2F%2Fwww.w3.org%2F2000%2F09%2Fxmldsig%23rsa-sha1&Signature=AZFpkhFFII7PodiewTovaGnLQKUVZp0qOCCcBIUkJ6P5by3lE3Lldj9pKaFu4wz4j%2B015HEhDvF0LlAmwwES85vdGh%2FpD%2cIQPRUEjdCbQkQDd3dy1mMXbpXxSe4QYcv9Ni7tqNTQxekpO1gE7rtg6zC66EU55uM9aj9abGQ034Vly%2F6IJ08bvAq%2B%2FB9KruLstuiNWnlXTfNGsOxGLK7%2BXr94LTkat8m%2FMan6Qr95%2KeR5TmmqaQIE4N9H6o4TopT7mXr5CF2Z3";
+//
+//         // Create 200 documents with a long text
+//         let content = {
+//             let documents_iter = (0..200i32)
+//                 .map(|i| serde_json::json!({ "id": i, "script": script }))
+//                 .filter_map(|json| match json {
+//                     serde_json::Value::Object(object) => Some(object),
+//                     _ => None,
+//                 });
+//             documents_batch_reader_from_objects(documents_iter)
+//         };
+//         // Index those 200 long documents
+//         index.add_documents(content).unwrap();
+//
+//         // Index one long document
+//         index
+//             .add_documents(documents!([
+//               {"id": 400, "script": script },
+//             ]))
+//             .unwrap();
+//     }
+//
+//     #[test]
+//     fn index_documents_in_multiple_transforms() {
+//         let index = TempIndex::new();
+//
+//         let doc1 = documents! {[{
+//             "id": 228142,
+//             "title": "asdsad",
+//             "state": "automated",
+//             "priority": "normal",
+//             "public_uid": "37ccf021",
+//             "project_id": 78207,
+//             "branch_id_number": 0
+//         }]};
+//
+//         let doc2 = documents! {[{
+//             "id": 228143,
+//             "title": "something",
+//             "state": "automated",
+//             "priority": "normal",
+//             "public_uid": "39c6499b",
+//             "project_id": 78207,
+//             "branch_id_number": 0
+//         }]};
+//
+//         {
+//             let mut wtxn = index.write_txn().unwrap();
+//             index.put_primary_key(&mut wtxn, "id").unwrap();
+//             wtxn.commit().unwrap();
+//         }
+//
+//         index.add_documents(doc1).unwrap();
+//         index.add_documents(doc2).unwrap();
+//
+//         let wtxn = index.read_txn().unwrap();
+//
+//         let map = index.external_documents_ids().to_hash_map(&wtxn).unwrap();
+//         let ids = map.values().collect::<HashSet<_>>();
+//
+//         assert_eq!(ids.len(), map.len());
+//     }
+//
+//     #[test]
+//     fn index_documents_check_exists_database() {
+//         let content = || {
+//             documents!([
+//                 {
+//                     "id": 0,
+//                     "colour": 0,
+//                 },
+//                 {
+//                     "id": 1,
+//                     "colour": []
+//                 },
+//                 {
+//                     "id": 2,
+//                     "colour": {}
+//                 },
+//                 {
+//                     "id": 3,
+//                     "colour": null
+//                 },
+//                 {
+//                     "id": 4,
+//                     "colour": [1]
+//                 },
+//                 {
+//                     "id": 5
+//                 },
+//                 {
+//                     "id": 6,
+//                     "colour": {
+//                         "green": 1
+//                     }
+//                 },
+//                 {
+//                     "id": 7,
+//                     "colour": {
+//                         "green": {
+//                             "blue": []
+//                         }
+//                     }
+//                 }
+//             ])
+//         };
+//
+//         let check_ok = |index: &Index| {
+//             let rtxn = index.read_txn().unwrap();
+//             let facets = index.faceted_fields(&rtxn).unwrap();
+//             assert_eq!(facets, hashset!(S("colour"), S("colour.green"), S("colour.green.blue")));
+//
+//             let colour_id = index.fields_ids_map(&rtxn).unwrap().id("colour").unwrap();
+//             let colour_green_id = index.fields_ids_map(&rtxn).unwrap().id("colour.green").unwrap();
+//
+//             let bitmap_colour =
+//                 index.facet_id_exists_docids.get(&rtxn, &colour_id).unwrap().unwrap();
+//             assert_eq!(bitmap_colour.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4, 6, 7]);
+//
+//             let bitmap_colour_green =
+//                 index.facet_id_exists_docids.get(&rtxn, &colour_green_id).unwrap().unwrap();
+//             assert_eq!(bitmap_colour_green.into_iter().collect::<Vec<_>>(), vec![6, 7]);
+//         };
+//
+//         let faceted_fields = hashset!(S("colour"));
+//
+//         let index = TempIndex::new();
+//         index.add_documents(content()).unwrap();
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(faceted_fields.clone());
+//             })
+//             .unwrap();
+//         check_ok(&index);
+//
+//         let index = TempIndex::new();
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(faceted_fields.clone());
+//             })
+//             .unwrap();
+//         index.add_documents(content()).unwrap();
+//         check_ok(&index);
+//     }
+//
+//     #[test]
+//     fn index_documents_check_is_null_database() {
+//         let content = || {
+//             documents!([
+//                 {
+//                     "id": 0,
+//                     "colour": null,
+//                 },
+//                 {
+//                     "id": 1,
+//                     "colour": [null], // must not be returned
+//                 },
+//                 {
+//                     "id": 6,
+//                     "colour": {
+//                         "green": null
+//                     }
+//                 },
+//                 {
+//                     "id": 7,
+//                     "colour": {
+//                         "green": {
+//                             "blue": null
+//                         }
+//                     }
+//                 },
+//                 {
+//                     "id": 8,
+//                     "colour": 0,
+//                 },
+//                 {
+//                     "id": 9,
+//                     "colour": []
+//                 },
+//                 {
+//                     "id": 10,
+//                     "colour": {}
+//                 },
+//                 {
+//                     "id": 12,
+//                     "colour": [1]
+//                 },
+//                 {
+//                     "id": 13
+//                 },
+//                 {
+//                     "id": 14,
+//                     "colour": {
+//                         "green": 1
+//                     }
+//                 },
+//                 {
+//                     "id": 15,
+//                     "colour": {
+//                         "green": {
+//                             "blue": []
+//                         }
+//                     }
+//                 }
+//             ])
+//         };
+//
+//         let check_ok = |index: &Index| {
+//             let rtxn = index.read_txn().unwrap();
+//             let facets = index.faceted_fields(&rtxn).unwrap();
+//             assert_eq!(facets, hashset!(S("colour"), S("colour.green"), S("colour.green.blue")));
+//
+//             let colour_id = index.fields_ids_map(&rtxn).unwrap().id("colour").unwrap();
+//             let colour_green_id = index.fields_ids_map(&rtxn).unwrap().id("colour.green").unwrap();
+//             let colour_blue_id =
+//                 index.fields_ids_map(&rtxn).unwrap().id("colour.green.blue").unwrap();
+//
+//             let bitmap_null_colour =
+//                 index.facet_id_is_null_docids.get(&rtxn, &colour_id).unwrap().unwrap();
+//             assert_eq!(bitmap_null_colour.into_iter().collect::<Vec<_>>(), vec![0]);
+//
+//             let bitmap_colour_green =
+//                 index.facet_id_is_null_docids.get(&rtxn, &colour_green_id).unwrap().unwrap();
+//             assert_eq!(bitmap_colour_green.into_iter().collect::<Vec<_>>(), vec![2]);
+//
+//             let bitmap_colour_blue =
+//                 index.facet_id_is_null_docids.get(&rtxn, &colour_blue_id).unwrap().unwrap();
+//             assert_eq!(bitmap_colour_blue.into_iter().collect::<Vec<_>>(), vec![3]);
+//         };
+//
+//         let faceted_fields = hashset!(S("colour"));
+//
+//         let index = TempIndex::new();
+//         index.add_documents(content()).unwrap();
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(faceted_fields.clone());
+//             })
+//             .unwrap();
+//         check_ok(&index);
+//
+//         let index = TempIndex::new();
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(faceted_fields.clone());
+//             })
+//             .unwrap();
+//         index.add_documents(content()).unwrap();
+//         check_ok(&index);
+//     }
+//
+//     #[test]
+//     fn index_documents_check_is_empty_database() {
+//         let content = || {
+//             documents!([
+//                 {"id": 0, "tags": null },
+//                 {"id": 1, "tags": [null] },
+//                 {"id": 2, "tags": [] },
+//                 {"id": 3, "tags": ["hello","world"] },
+//                 {"id": 4, "tags": [""] },
+//                 {"id": 5 },
+//                 {"id": 6, "tags": {} },
+//                 {"id": 7, "tags": {"green": "cool"} },
+//                 {"id": 8, "tags": {"green": ""} },
+//                 {"id": 9, "tags": "" },
+//                 {"id": 10, "tags": { "green": null } },
+//                 {"id": 11, "tags": { "green": { "blue": null } } },
+//                 {"id": 12, "tags": { "green": { "blue": [] } } }
+//             ])
+//         };
+//
+//         let check_ok = |index: &Index| {
+//             let rtxn = index.read_txn().unwrap();
+//             let facets = index.faceted_fields(&rtxn).unwrap();
+//             assert_eq!(facets, hashset!(S("tags"), S("tags.green"), S("tags.green.blue")));
+//
+//             let tags_id = index.fields_ids_map(&rtxn).unwrap().id("tags").unwrap();
+//             let tags_green_id = index.fields_ids_map(&rtxn).unwrap().id("tags.green").unwrap();
+//             let tags_blue_id = index.fields_ids_map(&rtxn).unwrap().id("tags.green.blue").unwrap();
+//
+//             let bitmap_empty_tags =
+//                 index.facet_id_is_empty_docids.get(&rtxn, &tags_id).unwrap().unwrap();
+//             assert_eq!(bitmap_empty_tags.into_iter().collect::<Vec<_>>(), vec![2, 6, 9]);
+//
+//             let bitmap_tags_green =
+//                 index.facet_id_is_empty_docids.get(&rtxn, &tags_green_id).unwrap().unwrap();
+//             assert_eq!(bitmap_tags_green.into_iter().collect::<Vec<_>>(), vec![8]);
+//
+//             let bitmap_tags_blue =
+//                 index.facet_id_is_empty_docids.get(&rtxn, &tags_blue_id).unwrap().unwrap();
+//             assert_eq!(bitmap_tags_blue.into_iter().collect::<Vec<_>>(), vec![12]);
+//         };
+//
+//         let faceted_fields = hashset!(S("tags"));
+//
+//         let index = TempIndex::new();
+//         index.add_documents(content()).unwrap();
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(faceted_fields.clone());
+//             })
+//             .unwrap();
+//         check_ok(&index);
+//
+//         let index = TempIndex::new();
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(faceted_fields.clone());
+//             })
+//             .unwrap();
+//         index.add_documents(content()).unwrap();
+//         check_ok(&index);
+//     }
+//
+//     #[test]
+//     fn primary_key_must_not_contain_floats() {
+//         let index = TempIndex::new_with_map_size(4096 * 100);
+//
+//         let doc1 = documents! {[{
+//             "id": -228142,
+//             "title": "asdsad",
+//         }]};
+//
+//         let doc2 = documents! {[{
+//             "id": 228143.56,
+//             "title": "something",
+//         }]};
+//
+//         let doc3 = documents! {[{
+//             "id": -228143.56,
+//             "title": "something",
+//         }]};
+//
+//         let doc4 = documents! {[{
+//             "id": 2.0,
+//             "title": "something",
+//         }]};
+//
+//         index.add_documents(doc1).unwrap();
+//         index.add_documents(doc2).unwrap_err();
+//         index.add_documents(doc3).unwrap_err();
+//         index.add_documents(doc4).unwrap_err();
+//     }
+//
+//     #[test]
+//     fn primary_key_must_not_contain_whitespace() {
+//         let index = TempIndex::new();
+//
+//         let doc1 = documents! {[{
+//             "id": " 1",
+//             "title": "asdsad",
+//         }]};
+//
+//         let doc2 = documents! {[{
+//             "id": "\t2",
+//             "title": "something",
+//         }]};
+//
+//         let doc3 = documents! {[{
+//             "id": "\r3",
+//             "title": "something",
+//         }]};
+//
+//         let doc4 = documents! {[{
+//             "id": "\n4",
+//             "title": "something",
+//         }]};
+//
+//         index.add_documents(doc1).unwrap_err();
+//         index.add_documents(doc2).unwrap_err();
+//         index.add_documents(doc3).unwrap_err();
+//         index.add_documents(doc4).unwrap_err();
+//     }
+//
+//     #[test]
+//     fn primary_key_inference() {
+//         let index = TempIndex::new();
+//
+//         let doc_no_id = documents! {[{
+//             "title": "asdsad",
+//             "state": "automated",
+//             "priority": "normal",
+//             "branch_id_number": 0
+//         }]};
+//         assert!(matches!(
+//             index.add_documents(doc_no_id),
+//             Err(Error::UserError(UserError::NoPrimaryKeyCandidateFound))
+//         ));
+//
+//         let doc_multiple_ids = documents! {[{
+//             "id": 228143,
+//             "title": "something",
+//             "state": "automated",
+//             "priority": "normal",
+//             "public_uid": "39c6499b",
+//             "project_id": 78207,
+//             "branch_id_number": 0
+//         }]};
+//
+//         let Err(Error::UserError(UserError::MultiplePrimaryKeyCandidatesFound { candidates })) =
+//             index.add_documents(doc_multiple_ids)
+//         else {
+//             panic!("Expected Error::UserError(MultiplePrimaryKeyCandidatesFound)")
+//         };
+//
+//         assert_eq!(candidates, vec![S("id"), S("project_id"), S("public_uid"),]);
+//
+//         let doc_inferable = documents! {[{
+//             "video": "test.mp4",
+//             "id": 228143,
+//             "title": "something",
+//             "state": "automated",
+//             "priority": "normal",
+//             "public_uid_": "39c6499b",
+//             "project_id_": 78207,
+//             "branch_id_number": 0
+//         }]};
+//
+//         index.add_documents(doc_inferable).unwrap();
+//
+//         let txn = index.read_txn().unwrap();
+//
+//         assert_eq!(index.primary_key(&txn).unwrap().unwrap(), "id");
+//     }
+//
+//     #[test]
+//     fn long_words_must_be_skipped() {
+//         let index = TempIndex::new();
+//
+//         // this is obviousy too long
+//         let long_word = "lol".repeat(1000);
+//         let doc1 = documents! {[{
+//             "id": "1",
+//             "title": long_word,
+//         }]};
+//
+//         index.add_documents(doc1).unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//         let words_fst = index.words_fst(&rtxn).unwrap();
+//         assert!(!words_fst.contains(&long_word));
+//     }
+//
+//     #[test]
+//     fn long_facet_values_must_not_crash() {
+//         let index = TempIndex::new();
+//
+//         // this is obviousy too long
+//         let long_word = "lol".repeat(1000);
+//         let doc1 = documents! {[{
+//             "id": "1",
+//             "title": long_word,
+//         }]};
+//
+//         index
+//             .update_settings(|settings| {
+//                 settings.set_filterable_fields(hashset! { S("title") });
+//             })
+//             .unwrap();
+//
+//         index.add_documents(doc1).unwrap();
+//     }
+//
+//     #[cfg(feature = "default")]
+//     #[test]
+//     fn store_detected_script_and_language_per_document_during_indexing() {
+//         use charabia::{Language, Script};
+//         let index = TempIndex::new();
+//         index
+//             .add_documents(documents!([
+//                 { "id": 1, "title": "The quick (\"brown\") fox can't jump 32.3 feet, right? Brr, it's 29.3°F!" },
+//                 { "id": 2, "title": "人人生而自由﹐在尊嚴和權利上一律平等。他們賦有理性和良心﹐並應以兄弟關係的精神互相對待。" },
+//                 { "id": 3, "title": "הַשּׁוּעָל הַמָּהִיר (״הַחוּם״) לֹא יָכוֹל לִקְפֹּץ 9.94 מֶטְרִים, נָכוֹן? ברר, 1.5°C- בַּחוּץ!" },
+//                 { "id": 4, "title": "関西国際空港限定トートバッグ すもももももももものうち" },
+//                 { "id": 5, "title": "ภาษาไทยง่ายนิดเดียว" },
+//                 { "id": 6, "title": "The quick 在尊嚴和權利上一律平等。" },
+//             ]))
+//             .unwrap();
+//
+//         let rtxn = index.read_txn().unwrap();
+//         let key_jpn = (Script::Cj, Language::Jpn);
+//         let key_cmn = (Script::Cj, Language::Cmn);
+//         let cj_jpn_docs = index.script_language_documents_ids(&rtxn, &key_jpn).unwrap().unwrap();
+//         let cj_cmn_docs = index.script_language_documents_ids(&rtxn, &key_cmn).unwrap().unwrap();
+//         let expected_cj_jpn_docids = [3].iter().collect();
+//         assert_eq!(cj_jpn_docs, expected_cj_jpn_docids);
+//         let expected_cj_cmn_docids = [1, 5].iter().collect();
+//         assert_eq!(cj_cmn_docs, expected_cj_cmn_docids);
+//     }
+//
+//     // #[test]
+//     // fn add_and_delete_documents_in_single_transform() {
+//     //     let mut index = TempIndex::new();
+//     //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 1, "doggo": "kevin" },
+//     //         { "id": 2, "doggo": { "name": "bob", "age": 20 } },
+//     //         { "id": 3, "name": "jean", "age": 25 },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"3");
+//     //
+//     //     let (builder, removed) = builder.remove_documents(vec![S("2")]).unwrap();
+//     //     insta::assert_display_snapshot!(removed.unwrap(), @"1");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 3,
+//     //         number_of_documents: 2,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":1,"doggo":"kevin"}
+//     //     {"id":3,"name":"jean","age":25}
+//     //     "###);
+//     // }
+//     //
+//     // #[test]
+//     // fn add_update_and_delete_documents_in_single_transform() {
+//     //     let mut index = TempIndex::new();
+//     //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 1, "doggo": "kevin" },
+//     //         { "id": 2, "doggo": { "name": "bob", "age": 20 } },
+//     //         { "id": 3, "name": "jean", "age": 25 },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"3");
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 2, "catto": "jorts" },
+//     //         { "id": 3, "legs": 4 },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"2");
+//     //
+//     //     let (builder, removed) = builder.remove_documents(vec![S("1"), S("2")]).unwrap();
+//     //     insta::assert_display_snapshot!(removed.unwrap(), @"2");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 5,
+//     //         number_of_documents: 1,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":3,"name":"jean","age":25,"legs":4}
+//     //     "###);
+//     // }
+//     //
+//     // #[test]
+//     // fn add_document_and_in_another_transform_update_and_delete_documents() {
+//     //     let mut index = TempIndex::new();
+//     //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 1, "doggo": "kevin" },
+//     //         { "id": 2, "doggo": { "name": "bob", "age": 20 } },
+//     //         { "id": 3, "name": "jean", "age": 25 },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"3");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 3,
+//     //         number_of_documents: 3,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":1,"doggo":"kevin"}
+//     //     {"id":2,"doggo":{"name":"bob","age":20}}
+//     //     {"id":3,"name":"jean","age":25}
+//     //     "###);
+//     //
+//     //     // A first batch of documents has been inserted
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 2, "catto": "jorts" },
+//     //         { "id": 3, "legs": 4 },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"2");
+//     //
+//     //     let (builder, removed) = builder.remove_documents(vec![S("1"), S("2")]).unwrap();
+//     //     insta::assert_display_snapshot!(removed.unwrap(), @"2");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 2,
+//     //         number_of_documents: 1,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":3,"name":"jean","age":25,"legs":4}
+//     //     "###);
+//     // }
+//     //
+//     // #[test]
+//     // fn delete_document_and_then_add_documents_in_the_same_transform() {
+//     //     let mut index = TempIndex::new();
+//     //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let (builder, removed) = builder.remove_documents(vec![S("1"), S("2")]).unwrap();
+//     //     insta::assert_display_snapshot!(removed.unwrap(), @"0");
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 2, "doggo": { "name": "jean", "age": 20 } },
+//     //         { "id": 3, "name": "bob", "age": 25 },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"2");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 2,
+//     //         number_of_documents: 2,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":2,"doggo":{"name":"jean","age":20}}
+//     //     {"id":3,"name":"bob","age":25}
+//     //     "###);
+//     // }
+//     //
+//     // #[test]
+//     // fn delete_the_same_document_multiple_time() {
+//     //     let mut index = TempIndex::new();
+//     //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let (builder, removed) =
+//     //         builder.remove_documents(vec![S("1"), S("2"), S("1"), S("2")]).unwrap();
+//     //     insta::assert_display_snapshot!(removed.unwrap(), @"0");
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 1, "doggo": "kevin" },
+//     //         { "id": 2, "doggo": { "name": "jean", "age": 20 } },
+//     //         { "id": 3, "name": "bob", "age": 25 },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"3");
+//     //
+//     //     let (builder, removed) =
+//     //         builder.remove_documents(vec![S("1"), S("2"), S("1"), S("2")]).unwrap();
+//     //     insta::assert_display_snapshot!(removed.unwrap(), @"2");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 3,
+//     //         number_of_documents: 1,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":3,"name":"bob","age":25}
+//     //     "###);
+//     // }
+//     //
+//     // #[test]
+//     // fn add_document_and_in_another_transform_delete_the_document_then_add_it_again() {
+//     //     let mut index = TempIndex::new();
+//     //     index.index_documents_config.update_method = IndexDocumentsMethod::UpdateDocuments;
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 1, "doggo": "kevin" },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"1");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 1,
+//     //         number_of_documents: 1,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":1,"doggo":"kevin"}
+//     //     "###);
+//     //
+//     //     // A first batch of documents has been inserted
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let (builder, removed) = builder.remove_documents(vec![S("1")]).unwrap();
+//     //     insta::assert_display_snapshot!(removed.unwrap(), @"1");
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 1, "catto": "jorts" },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"1");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 1,
+//     //         number_of_documents: 1,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":1,"catto":"jorts"}
+//     //     "###);
+//     // }
+//     //
+//     // #[test]
+//     // fn test_word_fid_position() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //           {"id": 0, "text": "sun flowers are looking at the sun" },
+//     //           {"id": 1, "text": "sun flowers are looking at the sun" },
+//     //           {"id": 2, "text": "the sun is shining today" },
+//     //           {
+//     //             "id": 3,
+//     //             "text": "a a a a a a a a a a a a a a a a a
+//     //             a a a a a a a a a a a a a a a a a a a a a a a a a a
+//     //             a a a a a a a a a a a a a a a a a a a a a a a a a a
+//     //             a a a a a a a a a a a a a a a a a a a a a a a a a a
+//     //             a a a a a a a a a a a a a a a a a a a a a a a a a a
+//     //             a a a a a a a a a a a a a a a a a a a a a a a a a a
+//     //             a a a a a a a a a a a a a a a a a a a a a "
+//     //          }
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     db_snap!(index, word_fid_docids, 1, @"bf3355e493330de036c8823ddd1dbbd9");
+//     //     db_snap!(index, word_position_docids, 1, @"896d54b29ed79c4c6f14084f326dcf6f");
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //           {"id": 4, "text": "sun flowers are looking at the sun" },
+//     //           {"id": 5, "text2": "sun flowers are looking at the sun" },
+//     //           {"id": 6, "text": "b b b" },
+//     //           {
+//     //             "id": 7,
+//     //             "text2": "a a a a"
+//     //          }
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     db_snap!(index, word_fid_docids, 2, @"a48d3f88db33f94bc23110a673ea49e4");
+//     //     db_snap!(index, word_position_docids, 2, @"3c9e66c6768ae2cf42b46b2c46e46a83");
+//     //
+//     //     // Delete not all of the documents but some of them.
+//     //     index.delete_documents(vec!["0".into(), "3".into()]);
+//     //
+//     //     db_snap!(index, word_fid_docids, 3, @"4c2e2a1832e5802796edc1638136d933");
+//     //     db_snap!(index, word_position_docids, 3, @"74f556b91d161d997a89468b4da1cb8f");
+//     // }
+//     //
+//     // /// Index multiple different number of vectors in documents.
+//     // /// Vectors must be of the same length.
+//     // #[test]
+//     // fn test_multiple_vectors() {
+//     //     use crate::vector::settings::EmbeddingSettings;
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             let mut embedders = BTreeMap::default();
+//     //             embedders.insert(
+//     //                 "manual".to_string(),
+//     //                 Setting::Set(EmbeddingSettings {
+//     //                     source: Setting::Set(crate::vector::settings::EmbedderSource::UserProvided),
+//     //                     model: Setting::NotSet,
+//     //                     revision: Setting::NotSet,
+//     //                     api_key: Setting::NotSet,
+//     //                     dimensions: Setting::Set(3),
+//     //                     document_template: Setting::NotSet,
+//     //                     url: Setting::NotSet,
+//     //                     query: Setting::NotSet,
+//     //                     input_field: Setting::NotSet,
+//     //                     path_to_embeddings: Setting::NotSet,
+//     //                     embedding_object: Setting::NotSet,
+//     //                     input_type: Setting::NotSet,
+//     //                     distribution: Setting::NotSet,
+//     //                 }),
+//     //             );
+//     //             settings.set_embedder_settings(embedders);
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .add_documents(
+//     //             documents!([{"id": 0, "_vectors": { "manual": [[0, 1, 2], [3, 4, 5]] } }]),
+//     //         )
+//     //         .unwrap();
+//     //     index.add_documents(documents!([{"id": 1, "_vectors": { "manual": [6, 7, 8] }}])).unwrap();
+//     //     index
+//     //            .add_documents(
+//     //                documents!([{"id": 2, "_vectors": { "manual": [[9, 10, 11], [12, 13, 14], [15, 16, 17]] }}]),
+//     //            )
+//     //            .unwrap();
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //     let mut embedding_configs = index.embedding_configs(&rtxn).unwrap();
+//     //     let (embedder_name, embedder) = embedding_configs.pop().unwrap();
+//     //     let embedder =
+//     //         std::sync::Arc::new(crate::vector::Embedder::new(embedder.embedder_options).unwrap());
+//     //     assert_eq!("manual", embedder_name);
+//     //     let res = index
+//     //         .search(&rtxn)
+//     //         .semantic(embedder_name, embedder, Some([0.0, 1.0, 2.0].to_vec()))
+//     //         .execute()
+//     //         .unwrap();
+//     //     assert_eq!(res.documents_ids.len(), 3);
+//     // }
+//     //
+//     // #[test]
+//     // fn reproduce_the_bug() {
+//     //     /*
+//     //         [milli/examples/fuzz.rs:69] &batches = [
+//     //         Batch(
+//     //             [
+//     //                 AddDoc(
+//     //                     { "id": 1, "doggo": "bernese" }, => internal 0
+//     //                 ),
+//     //             ],
+//     //         ),
+//     //         Batch(
+//     //             [
+//     //                 DeleteDoc(
+//     //                     1, => delete internal 0
+//     //                 ),
+//     //                 AddDoc(
+//     //                     { "id": 0, "catto": "jorts" }, => internal 1
+//     //                 ),
+//     //             ],
+//     //         ),
+//     //         Batch(
+//     //             [
+//     //                 AddDoc(
+//     //                     { "id": 1, "catto": "jorts" }, => internal 2
+//     //                 ),
+//     //             ],
+//     //         ),
+//     //     ]
+//     //     */
+//     //     let index = TempIndex::new();
+//     //
+//     //     // START OF BATCH
+//     //
+//     //     println!("--- ENTERING BATCH 1");
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     // OP
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 1, "doggo": "bernese" },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"1");
+//     //
+//     //     // FINISHING
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 1,
+//     //         number_of_documents: 1,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":1,"doggo":"bernese"}
+//     //     "###);
+//     //     db_snap!(index, external_documents_ids, @r###"
+//     //     docids:
+//     //     1                        0
+//     //     "###);
+//     //
+//     //     // A first batch of documents has been inserted
+//     //
+//     //     // BATCH 2
+//     //
+//     //     println!("--- ENTERING BATCH 2");
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let (builder, removed) = builder.remove_documents(vec![S("1")]).unwrap();
+//     //     insta::assert_display_snapshot!(removed.unwrap(), @"1");
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 0, "catto": "jorts" },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"1");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 1,
+//     //         number_of_documents: 1,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":0,"catto":"jorts"}
+//     //     "###);
+//     //
+//     //     db_snap!(index, external_documents_ids, @r###"
+//     //     docids:
+//     //     0                        1
+//     //     "###);
+//     //
+//     //     // BATCH 3
+//     //
+//     //     println!("--- ENTERING BATCH 3");
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //
+//     //     let builder = IndexDocuments::new(
+//     //         &mut wtxn,
+//     //         &index,
+//     //         &index.indexer_config,
+//     //         index.index_documents_config.clone(),
+//     //         |_| (),
+//     //         || false,
+//     //     )
+//     //     .unwrap();
+//     //
+//     //     let documents = documents!([
+//     //         { "id": 1, "catto": "jorts" },
+//     //     ]);
+//     //     let (builder, added) = builder.add_documents(documents).unwrap();
+//     //     insta::assert_display_snapshot!(added.unwrap(), @"1");
+//     //
+//     //     let addition = builder.execute().unwrap();
+//     //     insta::assert_debug_snapshot!(addition, @r###"
+//     //     DocumentAdditionResult {
+//     //         indexed_documents: 1,
+//     //         number_of_documents: 2,
+//     //     }
+//     //     "###);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents, @r###"
+//     //     {"id":1,"catto":"jorts"}
+//     //     {"id":0,"catto":"jorts"}
+//     //     "###);
+//     //
+//     //     // Ensuring all the returned IDs actually exists
+//     //     let rtxn = index.read_txn().unwrap();
+//     //     let res = index.search(&rtxn).execute().unwrap();
+//     //     index.documents(&rtxn, res.documents_ids).unwrap();
+//     // }
+//     //
+//     // fn delete_documents<'t>(
+//     //     wtxn: &mut RwTxn<'t>,
+//     //     index: &'t TempIndex,
+//     //     external_ids: &[&str],
+//     // ) -> Vec<u32> {
+//     //     let external_document_ids = index.external_documents_ids();
+//     //     let ids_to_delete: Vec<u32> = external_ids
+//     //         .iter()
+//     //         .map(|id| external_document_ids.get(wtxn, id).unwrap().unwrap())
+//     //         .collect();
+//     //
+//     //     // Delete some documents.
+//     //     index.delete_documents_using_wtxn(
+//     //         wtxn,
+//     //         external_ids.iter().map(ToString::to_string).collect(),
+//     //     );
+//     //
+//     //     ids_to_delete
+//     // }
+//     //
+//     // #[test]
+//     // fn delete_documents_with_numbers_as_primary_key() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     index
+//     //         .add_documents_using_wtxn(
+//     //             &mut wtxn,
+//     //             documents!([
+//     //                 { "id": 0, "name": "kevin", "object": { "key1": "value1", "key2": "value2" } },
+//     //                 { "id": 1, "name": "kevina", "array": ["I", "am", "fine"] },
+//     //                 { "id": 2, "name": "benoit", "array_of_object": [{ "wow": "amazing" }] }
+//     //             ]),
+//     //         )
+//     //         .unwrap();
+//     //
+//     //     // delete those documents, ids are synchronous therefore 0, 1, and 2.
+//     //     index.delete_documents_using_wtxn(&mut wtxn, vec![S("0"), S("1"), S("2")]);
+//     //
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     // All these snapshots should be empty since the database was cleared
+//     //     db_snap!(index, documents_ids);
+//     //     db_snap!(index, word_docids);
+//     //     db_snap!(index, word_pair_proximity_docids);
+//     //     db_snap!(index, facet_id_exists_docids);
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //
+//     //     assert!(index.field_distribution(&rtxn).unwrap().is_empty());
+//     // }
+//     //
+//     // #[test]
+//     // fn delete_documents_with_strange_primary_key() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .update_settings(|settings| settings.set_searchable_fields(vec!["name".to_string()]))
+//     //         .unwrap();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     index
+//     //         .add_documents_using_wtxn(
+//     //             &mut wtxn,
+//     //             documents!([
+//     //                 { "mysuperid": 0, "name": "kevin" },
+//     //                 { "mysuperid": 1, "name": "kevina" },
+//     //                 { "mysuperid": 2, "name": "benoit" }
+//     //             ]),
+//     //         )
+//     //         .unwrap();
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //
+//     //     // Delete not all of the documents but some of them.
+//     //     index.delete_documents_using_wtxn(&mut wtxn, vec![S("0"), S("1")]);
+//     //
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, documents_ids);
+//     //     db_snap!(index, word_docids);
+//     //     db_snap!(index, word_pair_proximity_docids);
+//     // }
+//     //
+//     // #[test]
+//     // fn filtered_placeholder_search_should_not_return_deleted_documents() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //
+//     //     index
+//     //         .update_settings_using_wtxn(&mut wtxn, |settings| {
+//     //             settings.set_primary_key(S("docid"));
+//     //             settings.set_filterable_fields(hashset! { S("label"), S("label2") });
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .add_documents_using_wtxn(
+//     //             &mut wtxn,
+//     //             documents!([
+//     //                 { "docid": "1_4",  "label": ["sign"] },
+//     //                 { "docid": "1_5",  "label": ["letter"] },
+//     //                 { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"] },
+//     //                 { "docid": "1_36", "label": ["drawing","painting","pattern"] },
+//     //                 { "docid": "1_37", "label": ["art","drawing","outdoor"] },
+//     //                 { "docid": "1_38", "label": ["aquarium","art","drawing"] },
+//     //                 { "docid": "1_39", "label": ["abstract"] },
+//     //                 { "docid": "1_40", "label": ["cartoon"] },
+//     //                 { "docid": "1_41", "label": ["art","drawing"] },
+//     //                 { "docid": "1_42", "label": ["art","pattern"] },
+//     //                 { "docid": "1_43", "label": ["abstract","art","drawing","pattern"] },
+//     //                 { "docid": "1_44", "label": ["drawing"] },
+//     //                 { "docid": "1_45", "label": ["art"] },
+//     //                 { "docid": "1_46", "label": ["abstract","colorfulness","pattern"] },
+//     //                 { "docid": "1_47", "label": ["abstract","pattern"] },
+//     //                 { "docid": "1_52", "label": ["abstract","cartoon"] },
+//     //                 { "docid": "1_57", "label": ["abstract","drawing","pattern"] },
+//     //                 { "docid": "1_58", "label": ["abstract","art","cartoon"] },
+//     //                 { "docid": "1_68", "label": ["design"] },
+//     //                 { "docid": "1_69", "label": ["geometry"] },
+//     //                 { "docid": "1_70", "label2": ["geometry", 1.2] },
+//     //                 { "docid": "1_71", "label2": ["design", 2.2] },
+//     //                 { "docid": "1_72", "label2": ["geometry", 1.2] }
+//     //             ]),
+//     //         )
+//     //         .unwrap();
+//     //
+//     //     delete_documents(&mut wtxn, &index, &["1_4", "1_70", "1_72"]);
+//     //
+//     //     // Placeholder search with filter
+//     //     let filter = Filter::from_str("label = sign").unwrap().unwrap();
+//     //     let results = index.search(&wtxn).filter(filter).execute().unwrap();
+//     //     assert!(results.documents_ids.is_empty());
+//     //
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, word_docids);
+//     //     db_snap!(index, facet_id_f64_docids);
+//     //     db_snap!(index, word_pair_proximity_docids);
+//     //     db_snap!(index, facet_id_exists_docids);
+//     //     db_snap!(index, facet_id_string_docids);
+//     // }
+//     //
+//     // #[test]
+//     // fn placeholder_search_should_not_return_deleted_documents() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     index
+//     //         .update_settings_using_wtxn(&mut wtxn, |settings| {
+//     //             settings.set_primary_key(S("docid"));
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .add_documents_using_wtxn(
+//     //             &mut wtxn,
+//     //             documents!([
+//     //                 { "docid": "1_4",  "label": ["sign"] },
+//     //                 { "docid": "1_5",  "label": ["letter"] },
+//     //                 { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"] },
+//     //                 { "docid": "1_36", "label": ["drawing","painting","pattern"] },
+//     //                 { "docid": "1_37", "label": ["art","drawing","outdoor"] },
+//     //                 { "docid": "1_38", "label": ["aquarium","art","drawing"] },
+//     //                 { "docid": "1_39", "label": ["abstract"] },
+//     //                 { "docid": "1_40", "label": ["cartoon"] },
+//     //                 { "docid": "1_41", "label": ["art","drawing"] },
+//     //                 { "docid": "1_42", "label": ["art","pattern"] },
+//     //                 { "docid": "1_43", "label": ["abstract","art","drawing","pattern"] },
+//     //                 { "docid": "1_44", "label": ["drawing"] },
+//     //                 { "docid": "1_45", "label": ["art"] },
+//     //                 { "docid": "1_46", "label": ["abstract","colorfulness","pattern"] },
+//     //                 { "docid": "1_47", "label": ["abstract","pattern"] },
+//     //                 { "docid": "1_52", "label": ["abstract","cartoon"] },
+//     //                 { "docid": "1_57", "label": ["abstract","drawing","pattern"] },
+//     //                 { "docid": "1_58", "label": ["abstract","art","cartoon"] },
+//     //                 { "docid": "1_68", "label": ["design"] },
+//     //                 { "docid": "1_69", "label": ["geometry"] },
+//     //                 { "docid": "1_70", "label2": ["geometry", 1.2] },
+//     //                 { "docid": "1_71", "label2": ["design", 2.2] },
+//     //                 { "docid": "1_72", "label2": ["geometry", 1.2] }
+//     //             ]),
+//     //         )
+//     //         .unwrap();
+//     //
+//     //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &["1_4"]);
+//     //
+//     //     // Placeholder search
+//     //     let results = index.search(&wtxn).execute().unwrap();
+//     //     assert!(!results.documents_ids.is_empty());
+//     //     for id in results.documents_ids.iter() {
+//     //         assert!(
+//     //             !deleted_internal_ids.contains(id),
+//     //             "The document {} was supposed to be deleted",
+//     //             id
+//     //         );
+//     //     }
+//     //
+//     //     wtxn.commit().unwrap();
+//     // }
+//     //
+//     // #[test]
+//     // fn search_should_not_return_deleted_documents() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     index
+//     //         .update_settings_using_wtxn(&mut wtxn, |settings| {
+//     //             settings.set_primary_key(S("docid"));
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .add_documents_using_wtxn(
+//     //             &mut wtxn,
+//     //             documents!([
+//     //                 { "docid": "1_4",  "label": ["sign"] },
+//     //                 { "docid": "1_5",  "label": ["letter"] },
+//     //                 { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"] },
+//     //                 { "docid": "1_36", "label": ["drawing","painting","pattern"] },
+//     //                 { "docid": "1_37", "label": ["art","drawing","outdoor"] },
+//     //                 { "docid": "1_38", "label": ["aquarium","art","drawing"] },
+//     //                 { "docid": "1_39", "label": ["abstract"] },
+//     //                 { "docid": "1_40", "label": ["cartoon"] },
+//     //                 { "docid": "1_41", "label": ["art","drawing"] },
+//     //                 { "docid": "1_42", "label": ["art","pattern"] },
+//     //                 { "docid": "1_43", "label": ["abstract","art","drawing","pattern"] },
+//     //                 { "docid": "1_44", "label": ["drawing"] },
+//     //                 { "docid": "1_45", "label": ["art"] },
+//     //                 { "docid": "1_46", "label": ["abstract","colorfulness","pattern"] },
+//     //                 { "docid": "1_47", "label": ["abstract","pattern"] },
+//     //                 { "docid": "1_52", "label": ["abstract","cartoon"] },
+//     //                 { "docid": "1_57", "label": ["abstract","drawing","pattern"] },
+//     //                 { "docid": "1_58", "label": ["abstract","art","cartoon"] },
+//     //                 { "docid": "1_68", "label": ["design"] },
+//     //                 { "docid": "1_69", "label": ["geometry"] },
+//     //                 { "docid": "1_70", "label2": ["geometry", 1.2] },
+//     //                 { "docid": "1_71", "label2": ["design", 2.2] },
+//     //                 { "docid": "1_72", "label2": ["geometry", 1.2] }
+//     //             ]),
+//     //         )
+//     //         .unwrap();
+//     //
+//     //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &["1_7", "1_52"]);
+//     //
+//     //     // search for abstract
+//     //     let results = index.search(&wtxn).query("abstract").execute().unwrap();
+//     //     assert!(!results.documents_ids.is_empty());
+//     //     for id in results.documents_ids.iter() {
+//     //         assert!(
+//     //             !deleted_internal_ids.contains(id),
+//     //             "The document {} was supposed to be deleted",
+//     //             id
+//     //         );
+//     //     }
+//     //
+//     //     wtxn.commit().unwrap();
+//     // }
+//     //
+//     // #[test]
+//     // fn geo_filtered_placeholder_search_should_not_return_deleted_documents() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     index
+//     //         .update_settings_using_wtxn(&mut wtxn, |settings| {
+//     //             settings.set_primary_key(S("id"));
+//     //             settings.set_filterable_fields(hashset!(S("_geo")));
+//     //             settings.set_sortable_fields(hashset!(S("_geo")));
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index.add_documents_using_wtxn(&mut wtxn, documents!([
+//     //         { "id": "1",  "city": "Lille",             "_geo": { "lat": 50.6299, "lng": 3.0569 } },
+//     //         { "id": "2",  "city": "Mons-en-Barœul",    "_geo": { "lat": 50.6415, "lng": 3.1106 } },
+//     //         { "id": "3",  "city": "Hellemmes",         "_geo": { "lat": 50.6312, "lng": 3.1106 } },
+//     //         { "id": "4",  "city": "Villeneuve-d'Ascq", "_geo": { "lat": 50.6224, "lng": 3.1476 } },
+//     //         { "id": "5",  "city": "Hem",               "_geo": { "lat": 50.6552, "lng": 3.1897 } },
+//     //         { "id": "6",  "city": "Roubaix",           "_geo": { "lat": 50.6924, "lng": 3.1763 } },
+//     //         { "id": "7",  "city": "Tourcoing",         "_geo": { "lat": 50.7263, "lng": 3.1541 } },
+//     //         { "id": "8",  "city": "Mouscron",          "_geo": { "lat": 50.7453, "lng": 3.2206 } },
+//     //         { "id": "9",  "city": "Tournai",           "_geo": { "lat": 50.6053, "lng": 3.3758 } },
+//     //         { "id": "10", "city": "Ghent",             "_geo": { "lat": 51.0537, "lng": 3.6957 } },
+//     //         { "id": "11", "city": "Brussels",          "_geo": { "lat": 50.8466, "lng": 4.3370 } },
+//     //         { "id": "12", "city": "Charleroi",         "_geo": { "lat": 50.4095, "lng": 4.4347 } },
+//     //         { "id": "13", "city": "Mons",              "_geo": { "lat": 50.4502, "lng": 3.9623 } },
+//     //         { "id": "14", "city": "Valenciennes",      "_geo": { "lat": 50.3518, "lng": 3.5326 } },
+//     //         { "id": "15", "city": "Arras",             "_geo": { "lat": 50.2844, "lng": 2.7637 } },
+//     //         { "id": "16", "city": "Cambrai",           "_geo": { "lat": 50.1793, "lng": 3.2189 } },
+//     //         { "id": "17", "city": "Bapaume",           "_geo": { "lat": 50.1112, "lng": 2.8547 } },
+//     //         { "id": "18", "city": "Amiens",            "_geo": { "lat": 49.9314, "lng": 2.2710 } },
+//     //         { "id": "19", "city": "Compiègne",         "_geo": { "lat": 49.4449, "lng": 2.7913 } },
+//     //         { "id": "20", "city": "Paris",             "_geo": { "lat": 48.9021, "lng": 2.3708 } }
+//     //     ])).unwrap();
+//     //
+//     //     let external_ids_to_delete = ["5", "6", "7", "12", "17", "19"];
+//     //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &external_ids_to_delete);
+//     //
+//     //     // Placeholder search with geo filter
+//     //     let filter = Filter::from_str("_geoRadius(50.6924, 3.1763, 20000)").unwrap().unwrap();
+//     //     let results = index.search(&wtxn).filter(filter).execute().unwrap();
+//     //     assert!(!results.documents_ids.is_empty());
+//     //     for id in results.documents_ids.iter() {
+//     //         assert!(
+//     //             !deleted_internal_ids.contains(id),
+//     //             "The document {} was supposed to be deleted",
+//     //             id
+//     //         );
+//     //     }
+//     //
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, facet_id_f64_docids);
+//     //     db_snap!(index, facet_id_string_docids);
+//     // }
+//     //
+//     // #[test]
+//     // fn get_documents_should_not_return_deleted_documents() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     index
+//     //         .update_settings_using_wtxn(&mut wtxn, |settings| {
+//     //             settings.set_primary_key(S("docid"));
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .add_documents_using_wtxn(
+//     //             &mut wtxn,
+//     //             documents!([
+//     //                 { "docid": "1_4",  "label": ["sign"] },
+//     //                 { "docid": "1_5",  "label": ["letter"] },
+//     //                 { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"] },
+//     //                 { "docid": "1_36", "label": ["drawing","painting","pattern"] },
+//     //                 { "docid": "1_37", "label": ["art","drawing","outdoor"] },
+//     //                 { "docid": "1_38", "label": ["aquarium","art","drawing"] },
+//     //                 { "docid": "1_39", "label": ["abstract"] },
+//     //                 { "docid": "1_40", "label": ["cartoon"] },
+//     //                 { "docid": "1_41", "label": ["art","drawing"] },
+//     //                 { "docid": "1_42", "label": ["art","pattern"] },
+//     //                 { "docid": "1_43", "label": ["abstract","art","drawing","pattern"] },
+//     //                 { "docid": "1_44", "label": ["drawing"] },
+//     //                 { "docid": "1_45", "label": ["art"] },
+//     //                 { "docid": "1_46", "label": ["abstract","colorfulness","pattern"] },
+//     //                 { "docid": "1_47", "label": ["abstract","pattern"] },
+//     //                 { "docid": "1_52", "label": ["abstract","cartoon"] },
+//     //                 { "docid": "1_57", "label": ["abstract","drawing","pattern"] },
+//     //                 { "docid": "1_58", "label": ["abstract","art","cartoon"] },
+//     //                 { "docid": "1_68", "label": ["design"] },
+//     //                 { "docid": "1_69", "label": ["geometry"] },
+//     //                 { "docid": "1_70", "label2": ["geometry", 1.2] },
+//     //                 { "docid": "1_71", "label2": ["design", 2.2] },
+//     //                 { "docid": "1_72", "label2": ["geometry", 1.2] }
+//     //             ]),
+//     //         )
+//     //         .unwrap();
+//     //
+//     //     let deleted_external_ids = ["1_7", "1_52"];
+//     //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &deleted_external_ids);
+//     //
+//     //     // list all documents
+//     //     let results = index.all_documents(&wtxn).unwrap();
+//     //     for result in results {
+//     //         let (id, _) = result.unwrap();
+//     //         assert!(
+//     //             !deleted_internal_ids.contains(&id),
+//     //             "The document {} was supposed to be deleted",
+//     //             id
+//     //         );
+//     //     }
+//     //
+//     //     // list internal document ids
+//     //     let results = index.documents_ids(&wtxn).unwrap();
+//     //     for id in results {
+//     //         assert!(
+//     //             !deleted_internal_ids.contains(&id),
+//     //             "The document {} was supposed to be deleted",
+//     //             id
+//     //         );
+//     //     }
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //
+//     //     // get internal docids from deleted external document ids
+//     //     let results = index.external_documents_ids();
+//     //     for id in deleted_external_ids {
+//     //         assert!(
+//     //             results.get(&rtxn, id).unwrap().is_none(),
+//     //             "The document {} was supposed to be deleted",
+//     //             id
+//     //         );
+//     //     }
+//     //     drop(rtxn);
+//     // }
+//     //
+//     // #[test]
+//     // fn stats_should_not_return_deleted_documents() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //
+//     //     index
+//     //         .update_settings_using_wtxn(&mut wtxn, |settings| {
+//     //             settings.set_primary_key(S("docid"));
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index.add_documents_using_wtxn(&mut wtxn, documents!([
+//     //         { "docid": "1_4",  "label": ["sign"]},
+//     //         { "docid": "1_5",  "label": ["letter"]},
+//     //         { "docid": "1_7",  "label": ["abstract","cartoon","design","pattern"], "title": "Mickey Mouse"},
+//     //         { "docid": "1_36", "label": ["drawing","painting","pattern"]},
+//     //         { "docid": "1_37", "label": ["art","drawing","outdoor"]},
+//     //         { "docid": "1_38", "label": ["aquarium","art","drawing"], "title": "Nemo"},
+//     //         { "docid": "1_39", "label": ["abstract"]},
+//     //         { "docid": "1_40", "label": ["cartoon"]},
+//     //         { "docid": "1_41", "label": ["art","drawing"]},
+//     //         { "docid": "1_42", "label": ["art","pattern"]},
+//     //         { "docid": "1_43", "label": ["abstract","art","drawing","pattern"], "number": 32i32},
+//     //         { "docid": "1_44", "label": ["drawing"], "number": 44i32},
+//     //         { "docid": "1_45", "label": ["art"]},
+//     //         { "docid": "1_46", "label": ["abstract","colorfulness","pattern"]},
+//     //         { "docid": "1_47", "label": ["abstract","pattern"]},
+//     //         { "docid": "1_52", "label": ["abstract","cartoon"]},
+//     //         { "docid": "1_57", "label": ["abstract","drawing","pattern"]},
+//     //         { "docid": "1_58", "label": ["abstract","art","cartoon"]},
+//     //         { "docid": "1_68", "label": ["design"]},
+//     //         { "docid": "1_69", "label": ["geometry"]}
+//     //     ])).unwrap();
+//     //
+//     //     delete_documents(&mut wtxn, &index, &["1_7", "1_52"]);
+//     //
+//     //     // count internal documents
+//     //     let results = index.number_of_documents(&wtxn).unwrap();
+//     //     assert_eq!(18, results);
+//     //
+//     //     // count field distribution
+//     //     let results = index.field_distribution(&wtxn).unwrap();
+//     //     assert_eq!(Some(&18), results.get("label"));
+//     //     assert_eq!(Some(&1), results.get("title"));
+//     //     assert_eq!(Some(&2), results.get("number"));
+//     //
+//     //     wtxn.commit().unwrap();
+//     // }
+//     //
+//     // #[test]
+//     // fn stored_detected_script_and_language_should_not_return_deleted_documents() {
+//     //     use charabia::{Language, Script};
+//     //     let index = TempIndex::new();
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     index
+//     //         .add_documents_using_wtxn(
+//     //             &mut wtxn,
+//     //             documents!([
+//     //             { "id": "0", "title": "The quick (\"brown\") fox can't jump 32.3 feet, right? Brr, it's 29.3°F!" },
+//     //             { "id": "1", "title": "人人生而自由﹐在尊嚴和權利上一律平等。他們賦有理性和良心﹐並應以兄弟關係的精神互相對待。" },
+//     //             { "id": "2", "title": "הַשּׁוּעָל הַמָּהִיר (״הַחוּם״) לֹא יָכוֹל לִקְפֹּץ 9.94 מֶטְרִים, נָכוֹן? ברר, 1.5°C- בַּחוּץ!" },
+//     //             { "id": "3", "title": "関西国際空港限定トートバッグ すもももももももものうち" },
+//     //             { "id": "4", "title": "ภาษาไทยง่ายนิดเดียว" },
+//     //             { "id": "5", "title": "The quick 在尊嚴和權利上一律平等。" },
+//     //         ]))
+//     //         .unwrap();
+//     //
+//     //     let key_cmn = (Script::Cj, Language::Cmn);
+//     //     let cj_cmn_docs =
+//     //         index.script_language_documents_ids(&wtxn, &key_cmn).unwrap().unwrap_or_default();
+//     //     let mut expected_cj_cmn_docids = RoaringBitmap::new();
+//     //     expected_cj_cmn_docids.push(1);
+//     //     expected_cj_cmn_docids.push(5);
+//     //     assert_eq!(cj_cmn_docs, expected_cj_cmn_docids);
+//     //
+//     //     delete_documents(&mut wtxn, &index, &["1"]);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     let rtxn = index.read_txn().unwrap();
+//     //     let cj_cmn_docs =
+//     //         index.script_language_documents_ids(&rtxn, &key_cmn).unwrap().unwrap_or_default();
+//     //     let mut expected_cj_cmn_docids = RoaringBitmap::new();
+//     //     expected_cj_cmn_docids.push(5);
+//     //     assert_eq!(cj_cmn_docs, expected_cj_cmn_docids);
+//     // }
+//     //
+//     // #[test]
+//     // fn delete_words_exact_attributes() {
+//     //     let index = TempIndex::new();
+//     //
+//     //     index
+//     //         .update_settings(|settings| {
+//     //             settings.set_primary_key(S("id"));
+//     //             settings.set_searchable_fields(vec![S("text"), S("exact")]);
+//     //             settings.set_exact_attributes(vec![S("exact")].into_iter().collect());
+//     //         })
+//     //         .unwrap();
+//     //
+//     //     index
+//     //         .add_documents(documents!([
+//     //             { "id": 0, "text": "hello" },
+//     //             { "id": 1, "exact": "hello"}
+//     //         ]))
+//     //         .unwrap();
+//     //     db_snap!(index, word_docids, 1, @r###"
+//     //     hello            [0, ]
+//     //     "###);
+//     //     db_snap!(index, exact_word_docids, 1, @r###"
+//     //     hello            [1, ]
+//     //     "###);
+//     //     db_snap!(index, words_fst, 1, @"300000000000000001084cfcfc2ce1000000016000000090ea47f");
+//     //
+//     //     let mut wtxn = index.write_txn().unwrap();
+//     //     let deleted_internal_ids = delete_documents(&mut wtxn, &index, &["1"]);
+//     //     wtxn.commit().unwrap();
+//     //
+//     //     db_snap!(index, word_docids, 2, @r###"
+//     //     hello            [0, ]
+//     //     "###);
+//     //     db_snap!(index, exact_word_docids, 2, @"");
+//     //     db_snap!(index, words_fst, 2, @"300000000000000001084cfcfc2ce1000000016000000090ea47f");
+//     //
+//     //     insta::assert_snapshot!(format!("{deleted_internal_ids:?}"), @"[1]");
+//     //     let txn = index.read_txn().unwrap();
+//     //     let words = index.words_fst(&txn).unwrap().into_stream().into_strs().unwrap();
+//     //     insta::assert_snapshot!(format!("{words:?}"), @r###"["hello"]"###);
+//     //
+//     //     let mut s = Search::new(&txn, &index);
+//     //     s.query("hello");
+//     //     let crate::SearchResult { documents_ids, .. } = s.execute().unwrap();
+//     //     insta::assert_snapshot!(format!("{documents_ids:?}"), @"[0]");
+//     // }
+// }

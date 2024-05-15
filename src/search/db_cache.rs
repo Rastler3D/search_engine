@@ -9,50 +9,141 @@ use crate::heed_codec::{BytesDecodeOwned, StrBEU16Codec};
 use crate::update::{merge_cbo_roaring_bitmaps, MergeFn};
 use crate::{CboRoaringBitmapCodec, CboRoaringBitmapLenCodec, Result, U8StrStrCodec};
 use crate::proximity::ProximityPrecision;
+use crate::search::context::{Fid, Position};
 use crate::search::search::SearchContext;
 
 
 #[derive(Default)]
 pub struct DatabaseCache<'ctx> {
     pub word_pair_proximity_docids:
-    FxHashMap<(u8, Cow<'static,str>, Cow<'static, str>), Option<Cow<'ctx, [u8]>>>,
+    FxHashMap<PairProximity<'static>, Option<Cow<'ctx, [u8]>>>,
     pub word_prefix_pair_proximity_docids:
-    FxHashMap<(u8, Cow<'static,str>, Cow<'static, str>), Option<RoaringBitmap>>,
+    FxHashMap<PairProximity<'static>, Option<RoaringBitmap>>,
     pub prefix_word_pair_proximity_docids:
-    FxHashMap<(u8, Cow<'static,str>, Cow<'static, str>), Option<Cow<'ctx, [u8]>>>,
+    FxHashMap<PairProximity<'static>, Option<Cow<'ctx, [u8]>>>,
+    pub prefix_prefix_pair_proximity_docids:
+    FxHashMap<PairProximity<'static>, Option<RoaringBitmap>>,
     pub word_docids: FxHashMap<String, Option<Cow<'ctx, [u8]>>>,
     pub exact_word_docids: FxHashMap<String, Option<Cow<'ctx, [u8]>>>,
     pub word_prefix_docids: FxHashMap<String, Option<Cow<'ctx, [u8]>>>,
     pub exact_word_prefix_docids: FxHashMap<String, Option<Cow<'ctx, [u8]>>>,
 
     pub words_fst: Option<fst::Set<Cow<'ctx, [u8]>>>,
-    pub word_position_docids: FxHashMap<(Cow<'static, str>, u16), Option<Cow<'ctx, [u8]>>>,
-    pub word_prefix_position_docids: FxHashMap<(Cow<'static, str>, u16), Option<Cow<'ctx, [u8]>>>,
+    pub word_position_docids: FxHashMap<WordPosition<'static>, Option<Cow<'ctx, [u8]>>>,
+    pub word_prefix_position_docids: FxHashMap<WordPosition<'static>, Option<Cow<'ctx, [u8]>>>,
     pub word_positions: FxHashMap<String, Vec<u16>>,
     pub word_prefix_positions: FxHashMap<String, Vec<u16>>,
 
-    pub word_fid_docids: FxHashMap<(Cow<'static, str>, u16), Option<Cow<'ctx, [u8]>>>,
-    pub word_prefix_fid_docids: FxHashMap<(Cow<'static, str>, u16), Option<Cow<'ctx, [u8]>>>,
+    pub word_fid_docids: FxHashMap<WordFid<'static>, Option<Cow<'ctx, [u8]>>>,
+    pub word_prefix_fid_docids: FxHashMap<WordFid<'static>, Option<Cow<'ctx, [u8]>>>,
     pub word_fids: FxHashMap<String, Vec<u16>>,
     pub word_prefix_fids: FxHashMap<String, Vec<u16>>,
 }
 impl<'ctx> DatabaseCache<'ctx> {
     fn get_value<'v, K1, KC, DC, KB>(
         txn: &'ctx RoTxn,
-        cache_key: &KB,
+        cache_key: &'v KB,
         db_key: &'v KC::EItem,
         cache: &mut FxHashMap<K1, Option<Cow<'ctx, [u8]>>>,
         db: Database<KC, Bytes>,
     ) -> Result<Option<DC::DItem>>
         where
-            KB: Eq + Hash + ToOwned<Owned = K1> + ?Sized,
+            KB: Eq + Hash + ?Sized,
             KC: BytesEncode<'v>,
             DC: BytesDecodeOwned,
-            K1: Borrow<KB> + Eq + Hash
+            K1: Borrow<KB> + Eq + Hash + From<&'v KB>,
+            &'v KB: Into<K1>
     {
         if !cache.contains_key(cache_key) {
             let bitmap_ptr = db.get(txn, db_key)?.map(Cow::Borrowed);
-            cache.insert(cache_key.to_owned(), bitmap_ptr);
+            cache.insert(<K1 as From<&'v KB>>::from(cache_key), bitmap_ptr);
+        }
+
+        match cache.get(cache_key).unwrap() {
+            Some(Cow::Borrowed(bytes)) => DC::bytes_decode_owned(bytes)
+                .map(Some)
+                .map_err(heed::Error::Decoding)
+                .map_err(Into::into),
+            Some(Cow::Owned(bytes)) => DC::bytes_decode_owned(bytes)
+                .map(Some)
+                .map_err(heed::Error::Decoding)
+                .map_err(Into::into),
+            None => Ok(None),
+        }
+    }
+
+    fn get_proximity_value<'v, KC, DC>(
+        txn: &'ctx RoTxn,
+        cache_key: &'v PairProximity<'v>,
+        db_key: &'v KC::EItem,
+        cache: &mut FxHashMap<PairProximity<'static>, Option<Cow<'ctx, [u8]>>>,
+        db: Database<KC, Bytes>,
+    ) -> Result<Option<DC::DItem>>
+        where
+            KC: BytesEncode<'v>,
+            DC: BytesDecodeOwned,
+    {
+        if !cache.contains_key(cache_key) {
+            let bitmap_ptr = db.get(txn, db_key)?.map(Cow::Borrowed);
+            cache.insert(<&PairProximity<'v> as Into<PairProximity<'static>>>::into(cache_key), bitmap_ptr);
+        }
+
+        match cache.get(cache_key).unwrap() {
+            Some(Cow::Borrowed(bytes)) => DC::bytes_decode_owned(bytes)
+                .map(Some)
+                .map_err(heed::Error::Decoding)
+                .map_err(Into::into),
+            Some(Cow::Owned(bytes)) => DC::bytes_decode_owned(bytes)
+                .map(Some)
+                .map_err(heed::Error::Decoding)
+                .map_err(Into::into),
+            None => Ok(None),
+        }
+    }
+
+    fn get_fid_value<'v, KC, DC>(
+        txn: &'ctx RoTxn,
+        cache_key: &'v WordFid<'v>,
+        db_key: &'v KC::EItem,
+        cache: &mut FxHashMap<WordFid<'static>, Option<Cow<'ctx, [u8]>>>,
+        db: Database<KC, Bytes>,
+    ) -> Result<Option<DC::DItem>>
+        where
+            KC: BytesEncode<'v>,
+            DC: BytesDecodeOwned,
+    {
+        if !cache.contains_key(cache_key) {
+            let bitmap_ptr = db.get(txn, db_key)?.map(Cow::Borrowed);
+            cache.insert(<&WordFid<'v> as Into<WordFid<'static>>>::into(cache_key), bitmap_ptr);
+        }
+
+        match cache.get(cache_key).unwrap() {
+            Some(Cow::Borrowed(bytes)) => DC::bytes_decode_owned(bytes)
+                .map(Some)
+                .map_err(heed::Error::Decoding)
+                .map_err(Into::into),
+            Some(Cow::Owned(bytes)) => DC::bytes_decode_owned(bytes)
+                .map(Some)
+                .map_err(heed::Error::Decoding)
+                .map_err(Into::into),
+            None => Ok(None),
+        }
+    }
+
+    fn get_position_value<'v, KC, DC>(
+        txn: &'ctx RoTxn,
+        cache_key: &'v WordPosition<'v>,
+        db_key: &'v KC::EItem,
+        cache: &mut FxHashMap<WordPosition<'static>, Option<Cow<'ctx, [u8]>>>,
+        db: Database<KC, Bytes>,
+    ) -> Result<Option<DC::DItem>>
+        where
+            KC: BytesEncode<'v>,
+            DC: BytesDecodeOwned,
+    {
+        if !cache.contains_key(cache_key) {
+            let bitmap_ptr = db.get(txn, db_key)?.map(Cow::Borrowed);
+            cache.insert(<&WordPosition<'v> as Into<WordPosition<'static>>>::into(cache_key), bitmap_ptr);
         }
 
         match cache.get(cache_key).unwrap() {
@@ -193,7 +284,7 @@ impl<'ctx> SearchContext<'ctx> {
         }
     }
 
-    pub fn get_db_word_pair_proximity_docids(
+    pub fn get_db_word_pair_proximity_docids<'a>(
         &mut self,
         word1: &str,
         word2: &str,
@@ -207,7 +298,7 @@ impl<'ctx> SearchContext<'ctx> {
                 // 2. words in different attributes: no DB entry for these two words.
                 let proximity = 0;
                 let docids = if let Some(docids) =
-                    self.db_cache.word_pair_proximity_docids.get(&(proximity, word1.into(), word2.into()))
+                    self.db_cache.word_pair_proximity_docids.get(&PairProximity(proximity, word1.into(), word2.into()))
                 {
                     docids
                         .as_ref()
@@ -240,15 +331,15 @@ impl<'ctx> SearchContext<'ctx> {
                         .map_err(heed::Error::Decoding)?;
                     self.db_cache
                         .word_pair_proximity_docids
-                        .insert((proximity, word1.to_string().into(), word2.to_string().into()), encoded);
+                        .insert(PairProximity(proximity, word1.to_string().into(), word2.to_string().into()).into(), encoded);
                     Some(docids)
                 };
 
                 Ok(docids)
             }
-            ProximityPrecision::ByWord => DatabaseCache::get_value::<_, _, CboRoaringBitmapCodec,_>(
+            ProximityPrecision::ByWord => DatabaseCache::get_proximity_value::<_, CboRoaringBitmapCodec>(
                 self.txn,
-                &(proximity, word1.into(), word2.into()),
+                &PairProximity(proximity, Cow::Borrowed(word1), Cow::Borrowed(word2)),
                 &(
                     proximity,
                     word1,
@@ -271,9 +362,9 @@ impl<'ctx> SearchContext<'ctx> {
                 .get_db_word_pair_proximity_docids(word1, word2, proximity)?
                 .map(|d| d.len())),
             ProximityPrecision::ByWord => {
-                DatabaseCache::get_value::<_, _, CboRoaringBitmapLenCodec,_>(
+                DatabaseCache::get_proximity_value::<_, CboRoaringBitmapLenCodec>(
                     self.txn,
-                    &(proximity, word1.into(), word2.into()),
+                    &PairProximity(proximity, word1.into(), word2.into()),
                     &(proximity, word1, word2),
                     &mut self.db_cache.word_pair_proximity_docids,
                     self.index.word_pair_proximity_docids.remap_data_type::<Bytes>(),
@@ -298,7 +389,7 @@ impl<'ctx> SearchContext<'ctx> {
         }
 
         let docids = if let Some(docids) =
-            self.db_cache.word_prefix_pair_proximity_docids.get(&(proximity, word1.into(), prefix2.into()))
+            self.db_cache.word_prefix_pair_proximity_docids.get(&PairProximity(proximity, word1.into(), prefix2.into()))
         {
             docids.clone()
         } else {
@@ -349,7 +440,78 @@ impl<'ctx> SearchContext<'ctx> {
             };
             self.db_cache
                 .word_prefix_pair_proximity_docids
-                .insert((proximity, word1.into(), prefix2.into()), Some(prefix_docids.clone()));
+                .insert((&PairProximity(proximity, word1.into(), prefix2.into())).into(), Some(prefix_docids.clone()));
+            Some(prefix_docids)
+        };
+        Ok(docids)
+    }
+
+    pub fn get_db_prefix_prefix_pair_proximity_docids(
+        &mut self,
+        prefix1: &str,
+        prefix2: &str,
+        mut proximity: u8,
+    ) -> Result<Option<RoaringBitmap>> {
+        let proximity_precision = self.index.proximity_precision(self.txn)?.unwrap_or_default();
+        if proximity_precision == ProximityPrecision::ByAttribute {
+            // Force proximity to 0 because:
+            // in ByAttribute, there are only 2 possible distances:
+            // 1. words in same attribute: in that the DB contains (0, word1, word2)
+            // 2. words in different attributes: no DB entry for these two words.
+            proximity = 0;
+        }
+
+        let docids = if let Some(docids) =
+            self.db_cache.prefix_prefix_pair_proximity_docids.get(&PairProximity(proximity, prefix1.into(), prefix2.into()))
+        {
+            docids.clone()
+        } else {
+            let prefix_docids = match proximity_precision {
+                ProximityPrecision::ByAttribute => {
+                    // Compute the distance at the attribute level and store it in the cache.
+                    let fids = if let Some(fids) = self.index.searchable_fields_ids(self.txn)? {
+                        fids
+                    } else {
+                        self.index.fields_ids_map(self.txn)?.ids().collect()
+                    };
+                    let mut prefix_docids = RoaringBitmap::new();
+                    // for each field, intersect left word bitmap and right word bitmap,
+                    // then merge the result in a global bitmap before storing it in the cache.
+                    for fid in fids {
+                        let prefix1_docids = self.get_db_word_prefix_fid_docids(prefix1, fid)?;
+                        let prefix2_docids = self.get_db_word_prefix_fid_docids(prefix2, fid)?;
+                        if let (Some(prefix1_docids), Some(prefix2_docids)) =
+                            (prefix1_docids, prefix2_docids)
+                        {
+                            prefix_docids |= prefix1_docids & prefix2_docids;
+                        }
+                    }
+                    prefix_docids
+                }
+                ProximityPrecision::ByWord => {
+                    let mut key = Vec::with_capacity(prefix1.len() + 1);
+                    key.push(proximity);
+                    key.extend_from_slice(prefix1.as_bytes());
+                    let mut prefix_docids = RoaringBitmap::new();
+                    let remap_key_type = self
+                        .index
+                        .word_pair_proximity_docids
+                        .remap_key_type::<Bytes>()
+                        .prefix_iter(self.txn, &key)?
+                        .remap_key_type::<U8StrStrCodec>()
+                        .lazily_decode_data();
+                    for result in remap_key_type {
+                        let ((_,_,word2), docids) = result?;
+                        if word2.starts_with(prefix2){
+                            prefix_docids |= docids.decode().map_err(|err| heed::Error::Decoding(err))?;
+                        }
+                    }
+                    prefix_docids
+                }
+            };
+            self.db_cache
+                .prefix_prefix_pair_proximity_docids
+                .insert((&PairProximity(proximity, prefix1.into(), prefix2.into())).into(), Some(prefix_docids.clone()));
             Some(prefix_docids)
         };
         Ok(docids)
@@ -375,9 +537,9 @@ impl<'ctx> SearchContext<'ctx> {
             return Ok(None);
         }
 
-        DatabaseCache::get_value::<_, _, CboRoaringBitmapCodec, _>(
+        DatabaseCache::get_fid_value::<_, CboRoaringBitmapCodec>(
             self.txn,
-            &(word.into(), fid),
+            &WordFid(word.into(), fid),
             &(word,fid),
             &mut self.db_cache.word_fid_docids,
             self.index.word_fid_docids.remap_data_type::<Bytes>(),
@@ -394,9 +556,9 @@ impl<'ctx> SearchContext<'ctx> {
             return Ok(None);
         }
 
-        DatabaseCache::get_value::<_, _, CboRoaringBitmapCodec, _>(
+        DatabaseCache::get_fid_value::<_, CboRoaringBitmapCodec>(
             self.txn,
-            &(word_prefix.into(), fid),
+            &WordFid(word_prefix.into(), fid),
             &(word_prefix, fid),
             &mut self.db_cache.word_prefix_fid_docids,
             self.index.word_prefix_fid_docids.remap_data_type::<Bytes>(),
@@ -419,7 +581,7 @@ impl<'ctx> SearchContext<'ctx> {
                 for result in remap_key_type {
                     let ((_, fid), value) = result?;
                     // filling other caches to avoid searching for them again
-                    self.db_cache.word_fid_docids.insert((word.into(), fid), Some(Cow::Borrowed(value)));
+                    self.db_cache.word_fid_docids.insert(WordFid(Cow::Owned(word.to_string()), fid).into(), Some(Cow::Borrowed(value)));
                     fids.push(fid);
                 }
                 self.db_cache.word_fids.insert(word.to_string(), fids.clone());
@@ -445,7 +607,7 @@ impl<'ctx> SearchContext<'ctx> {
                 for result in remap_key_type {
                     let ((_, fid), value) = result?;
                     // filling other caches to avoid searching for them again
-                    self.db_cache.word_prefix_fid_docids.insert((word_prefix.into(), fid), Some(Cow::Borrowed(value)));
+                    self.db_cache.word_prefix_fid_docids.insert(WordFid(Cow::Owned(word_prefix.to_string()), fid).into(), Some(Cow::Borrowed(value)));
                     fids.push(fid);
                 }
                 self.db_cache.word_prefix_fids.insert(word_prefix.to_string(), fids.clone());
@@ -460,9 +622,9 @@ impl<'ctx> SearchContext<'ctx> {
         word: &str,
         position: u16,
     ) -> Result<Option<RoaringBitmap>> {
-        DatabaseCache::get_value::<_, _, CboRoaringBitmapCodec, _>(
+        DatabaseCache::get_position_value::<_, CboRoaringBitmapCodec>(
             self.txn,
-            &(word.into(), position),
+            &WordPosition(word.into(), position),
             &(word, position),
             &mut self.db_cache.word_position_docids,
             self.index.word_position_docids.remap_data_type::<Bytes>(),
@@ -474,9 +636,9 @@ impl<'ctx> SearchContext<'ctx> {
         word_prefix: &str,
         position: u16,
     ) -> Result<Option<RoaringBitmap>> {
-        DatabaseCache::get_value::<_, _, CboRoaringBitmapCodec, _>(
+        DatabaseCache::get_position_value::<_, CboRoaringBitmapCodec>(
             self.txn,
-            &(word_prefix.into(), position),
+            &WordPosition(word_prefix.into(), position),
             &(word_prefix, position),
             &mut self.db_cache.word_prefix_position_docids,
             self.index.word_prefix_position_docids.remap_data_type::<Bytes>(),
@@ -501,7 +663,7 @@ impl<'ctx> SearchContext<'ctx> {
                     // filling other caches to avoid searching for them again
                     self.db_cache
                         .word_position_docids
-                        .insert((word.into(), position), Some(Cow::Borrowed(value)));
+                        .insert(WordPosition(Cow::Owned(word.to_string()), position).into(), Some(Cow::Borrowed(value)));
                     positions.push(position);
                 }
                 self.db_cache.word_positions.insert(word.to_string(), positions.clone());
@@ -532,7 +694,7 @@ impl<'ctx> SearchContext<'ctx> {
                     // filling other caches to avoid searching for them again
                     self.db_cache
                         .word_prefix_position_docids
-                        .insert((word_prefix.into(), position), Some(Cow::Borrowed(value)));
+                        .insert(WordPosition(Cow::Owned(word_prefix.to_string()), position).into(), Some(Cow::Borrowed(value)));
                     positions.push(position);
                 }
                 self.db_cache.word_prefix_positions.insert(word_prefix.to_string(), positions.clone());
@@ -540,5 +702,27 @@ impl<'ctx> SearchContext<'ctx> {
             }
         };
         Ok(positions)
+    }
+}
+#[derive(Eq, PartialEq, Hash)]
+struct PairProximity<'str>(u8, Cow<'str, str>, Cow<'str, str>);
+impl<'str> From<&PairProximity<'str>> for PairProximity<'static> {
+    fn from(value: &PairProximity<'str>) -> Self {
+        PairProximity(value.0,Cow::Owned(value.1.to_string()), Cow::Owned(value.2.to_string()))
+    }
+}
+
+#[derive(Eq, PartialEq, Hash)]
+struct WordPosition<'str>(Cow<'str, str>, Position);
+impl<'str> From<&WordPosition<'str>> for WordPosition<'static> {
+    fn from(value: &WordPosition<'str>) -> Self {
+        WordPosition(Cow::Owned(value.0.to_string()), value.1)
+    }
+}
+#[derive(Eq, PartialEq, Hash)]
+struct WordFid<'str>(Cow<'str, str>, Fid);
+impl<'str> From<&WordFid<'str>> for WordFid<'static> {
+    fn from(value: &WordFid<'str>) -> Self {
+        WordFid(Cow::Owned(value.0.to_string()), value.1)
     }
 }

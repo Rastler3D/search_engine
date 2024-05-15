@@ -13,8 +13,6 @@ mod graph_visualize;
 mod query_graph;
 mod query_parser;
 mod context;
-mod typo_config;
-mod split_config;
 mod resolve_query_graph;
 mod fst_utils;
 mod search;
@@ -115,79 +113,79 @@ impl<'a> Search<'a> {
 
 
 
-    pub fn execute_for_candidates(&self, has_vector_search: bool) -> Result<RoaringBitmap> {
-        if has_vector_search {
-            let ctx = SearchContext::new(self.index, self.rtxn);
-            filtered_universe(&ctx, &self.filter)
-        } else {
-            Ok(self.execute()?.candidates)
-        }
-    }
-
-    pub fn execute(&self) -> Result<SearchResult> {
-        let mut ctx = SearchContext::new(self.index, self.rtxn);
-
-        if let Some(searchable_attributes) = self.searchable_attributes {
-            ctx.searchable_attributes(searchable_attributes)?;
-        }
-
-        let universe = filtered_universe(&ctx, &self.filter)?;
-        let PartialSearchResult {
-            located_query_terms,
-            candidates,
-            documents_ids,
-            document_scores,
-            degraded,
-            used_negative_operator,
-        } = match self.semantic.as_ref() {
-            Some(SemanticSearch { vector: Some(vector), embedder_name, embedder }) => {
-                execute_vector_search(
-                    &mut ctx,
-                    vector,
-                    self.scoring_strategy,
-                    universe,
-                    &self.sort_criteria,
-                    self.geo_strategy,
-                    self.offset,
-                    self.limit,
-                    embedder_name,
-                    embedder,
-                    self.time_budget.clone(),
-                )?
-            }
-            _ => execute_search(
-                &mut ctx,
-                self.query.as_deref(),
-                self.terms_matching_strategy,
-                self.scoring_strategy,
-                self.exhaustive_number_hits,
-                universe,
-                &self.sort_criteria,
-                self.geo_strategy,
-                self.offset,
-                self.limit,
-                Some(self.words_limit),
-                &mut DefaultSearchLogger,
-                &mut DefaultSearchLogger,
-                self.time_budget.clone(),
-            )?,
-        };
-
-        // consume context and located_query_terms to build MatchingWords.
-        // let matching_words = match located_query_terms {
-        //     Some(located_query_terms) => MatchingWords::new(ctx, located_query_terms),
-        //     None => MatchingWords::default(),
-        // };
-
-        Ok(SearchResult {
-            //matching_words,
-            candidates,
-            document_scores,
-            documents_ids,
-            degraded,
-            used_negative_operator,
-        })
-    }
+    // pub fn execute_for_candidates(&self, has_vector_search: bool) -> Result<RoaringBitmap> {
+    //     if has_vector_search {
+    //         let ctx = SearchContext::new(self.index, self.rtxn);
+    //         filtered_universe(&ctx, &self.filter)
+    //     } else {
+    //         Ok(self.execute()?.candidates)
+    //     }
+    // }
+    //
+    // pub fn execute(&self) -> Result<SearchResult> {
+    //     let mut ctx = SearchContext::new(self.index, self.rtxn);
+    //
+    //     if let Some(searchable_attributes) = self.searchable_attributes {
+    //         ctx.searchable_attributes(searchable_attributes)?;
+    //     }
+    //
+    //     let universe = filtered_universe(&ctx, &self.filter)?;
+    //     let PartialSearchResult {
+    //         located_query_terms,
+    //         candidates,
+    //         documents_ids,
+    //         document_scores,
+    //         degraded,
+    //         used_negative_operator,
+    //     } = match self.semantic.as_ref() {
+    //         Some(SemanticSearch { vector: Some(vector), embedder_name, embedder }) => {
+    //             execute_vector_search(
+    //                 &mut ctx,
+    //                 vector,
+    //                 self.scoring_strategy,
+    //                 universe,
+    //                 &self.sort_criteria,
+    //                 self.geo_strategy,
+    //                 self.offset,
+    //                 self.limit,
+    //                 embedder_name,
+    //                 embedder,
+    //                 self.time_budget.clone(),
+    //             )?
+    //         }
+    //         _ => execute_search(
+    //             &mut ctx,
+    //             self.query.as_deref(),
+    //             self.terms_matching_strategy,
+    //             self.scoring_strategy,
+    //             self.exhaustive_number_hits,
+    //             universe,
+    //             &self.sort_criteria,
+    //             self.geo_strategy,
+    //             self.offset,
+    //             self.limit,
+    //             Some(self.words_limit),
+    //             &mut DefaultSearchLogger,
+    //             &mut DefaultSearchLogger,
+    //             self.time_budget.clone(),
+    //         )?,
+    //     };
+    //
+    //     // consume context and located_query_terms to build MatchingWords.
+    //     // let matching_words = match located_query_terms {
+    //     //     Some(located_query_terms) => MatchingWords::new(ctx, located_query_terms),
+    //     //     None => MatchingWords::default(),
+    //     // };
+    //
+    //     Ok(SearchResult {
+    //         //matching_words,
+    //         candidates,
+    //         document_scores,
+    //         documents_ids,
+    //         degraded,
+    //         used_negative_operator,
+    //     })
+    // }
 }
 
 impl fmt::Debug for Search<'_> {
@@ -247,53 +245,53 @@ impl Default for TermsMatchingStrategy {
     }
 }
 
-fn get_first(s: &str) -> &str {
-    match s.chars().next() {
-        Some(c) => &s[..c.len_utf8()],
-        None => panic!("unexpected empty query"),
-    }
-}
-
-// pub fn build_dfa(word: &str, typos: u8, is_prefix: bool) -> DFA {
-//     let lev = match typos {
-//         0 => &LEVDIST0,
-//         1 => &LEVDIST1,
-//         _ => &LEVDIST2,
-//     };
-//
-//     if is_prefix {
-//         lev.build_prefix_dfa(word)
-//     } else {
-//         lev.build_dfa(word)
+// fn get_first(s: &str) -> &str {
+//     match s.chars().next() {
+//         Some(c) => &s[..c.len_utf8()],
+//         None => panic!("unexpected empty query"),
 //     }
 // }
-
-#[cfg(test)]
-mod test {
-    #[allow(unused_imports)]
-    use super::*;
-
-    #[cfg(feature = "japanese")]
-    #[test]
-    fn test_kanji_language_detection() {
-        use crate::index::tests::TempIndex;
-
-        let index = TempIndex::new();
-
-        index
-            .add_documents(documents!([
-                { "id": 0, "title": "The quick (\"brown\") fox can't jump 32.3 feet, right? Brr, it's 29.3°F!" },
-                { "id": 1, "title": "東京のお寿司。" },
-                { "id": 2, "title": "הַשּׁוּעָל הַמָּהִיר (״הַחוּם״) לֹא יָכוֹל לִקְפֹּץ 9.94 מֶטְרִים, נָכוֹן? ברר, 1.5°C- בַּחוּץ!" }
-            ]))
-            .unwrap();
-
-        let txn = index.write_txn().unwrap();
-        let mut search = Search::new(&txn, &index);
-
-        search.query("東京");
-        let SearchResult { documents_ids, .. } = search.execute().unwrap();
-
-        assert_eq!(documents_ids, vec![1]);
-    }
-}
+//
+// // pub fn build_dfa(word: &str, typos: u8, is_prefix: bool) -> DFA {
+// //     let lev = match typos {
+// //         0 => &LEVDIST0,
+// //         1 => &LEVDIST1,
+// //         _ => &LEVDIST2,
+// //     };
+// //
+// //     if is_prefix {
+// //         lev.build_prefix_dfa(word)
+// //     } else {
+// //         lev.build_dfa(word)
+// //     }
+// // }
+//
+// #[cfg(test)]
+// mod test {
+//     #[allow(unused_imports)]
+//     use super::*;
+//
+//     #[cfg(feature = "japanese")]
+//     #[test]
+//     fn test_kanji_language_detection() {
+//         use crate::index::tests::TempIndex;
+//
+//         let index = TempIndex::new();
+//
+//         index
+//             .add_documents(documents!([
+//                 { "id": 0, "title": "The quick (\"brown\") fox can't jump 32.3 feet, right? Brr, it's 29.3°F!" },
+//                 { "id": 1, "title": "東京のお寿司。" },
+//                 { "id": 2, "title": "הַשּׁוּעָל הַמָּהִיר (״הַחוּם״) לֹא יָכוֹל לִקְפֹּץ 9.94 מֶטְרִים, נָכוֹן? ברר, 1.5°C- בַּחוּץ!" }
+//             ]))
+//             .unwrap();
+//
+//         let txn = index.write_txn().unwrap();
+//         let mut search = Search::new(&txn, &index);
+//
+//         search.query("東京");
+//         let SearchResult { documents_ids, .. } = search.execute().unwrap();
+//
+//         assert_eq!(documents_ids, vec![1]);
+//     }
+// }

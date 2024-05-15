@@ -2,7 +2,7 @@ use crate::search::context::{Context, Fid};
 use crate::search::query_graph::{GraphNode, NodeData, QueryGraph};
 use crate::search::query_parser::{Term, TermKind};
 use crate::search::ranking::paths_cost::Cost;
-use crate::search::resolve_query_graph::resolve_positions;
+//use crate::search::resolve_query_graph::resolve_positions;
 use crate::search::utils::bit_set::BitSet;
 use crate::search::utils::vec_map::VecMap;
 use itertools::Itertools;
@@ -10,11 +10,12 @@ use polonius_the_crab::{polonius, polonius_return};
 use roaring::RoaringBitmap;
 use std::iter::empty;
 use std::time::Instant;
+use crate::Result;
 
 pub fn paths_cost(
     graph: &QueryGraph,
     search_context: &impl Context,
-) -> heed::Result<VecMap<Vec<(BitSet, RoaringBitmap)>>> {
+) -> Result<VecMap<Vec<(BitSet, RoaringBitmap)>>> {
     let mut cost = VecMap::with_capacity(graph.nodes.len());
     let mut visited = VecMap::with_capacity(graph.nodes.len());
     println!("{:?}", graph);
@@ -30,7 +31,7 @@ fn graph_traverse<'search, 'cost, 'visited>(
     search_context: &'search impl Context,
     mut cost: &'cost mut VecMap<VecMap<RoaringBitmap>>,
     mut visited: &'visited mut VecMap<VecMap<Vec<(BitSet, RoaringBitmap)>>>,
-) -> heed::Result<&'visited VecMap<Vec<(BitSet, RoaringBitmap)>>> {
+) -> Result<&'visited VecMap<Vec<(BitSet, RoaringBitmap)>>> {
 
     let node = &graph.nodes[node_id];
     if !cost.contains_key(node_id) {
@@ -52,7 +53,7 @@ fn graph_traverse<'search, 'cost, 'visited>(
         }
         _ => {
             polonius!(
-                |visited| -> heed::Result<&'polonius VecMap<Vec<(BitSet, RoaringBitmap)>>> {
+                |visited| -> Result<&'polonius VecMap<Vec<(BitSet, RoaringBitmap)>>> {
                     if let Some(paths) = visited.get(node_id) {
                         polonius_return!(Ok(paths));
                     }
@@ -91,7 +92,7 @@ fn graph_traverse<'search, 'cost, 'visited>(
 pub fn attribute_cost(
     node: &GraphNode,
     context: &impl Context,
-) -> heed::Result<VecMap<RoaringBitmap>> {
+) -> Result<VecMap<RoaringBitmap>> {
     match &node.data {
         NodeData::Start | NodeData::End => {
             let mut vec_map = VecMap::new();
@@ -125,17 +126,17 @@ mod tests {
         let analyzer = build_analyzer();
         let stream = analyzer.analyze("Hello world HWWs Swwws");
         let parsed_query = parse_query(stream);
-        let context = TestContext::default();
+        let mut context = TestContext::default();
         //let query_graph = QueryGraph::from_query(parsed_query, &context).unwrap();
         let analyzer = build_analyzer();
         let stream = analyzer.analyze("Hello world");
         let parsed_query = parse_query(stream);
         let time = Instant::now();
-        let query_graph = QueryGraph::from_query(parsed_query, &context).unwrap();
+        let query_graph = QueryGraph::from_query(parsed_query, &mut context).unwrap();
         let elapsed = time.elapsed();
         println!("Graph build {:?}", elapsed);
         let time = Instant::now();
-        let mut costs = paths_cost(&query_graph, &context).unwrap();
+        let mut costs = paths_cost(&query_graph, &mut context).unwrap();
         let elapsed = time.elapsed();
         println!("Graph cost {:?}", elapsed);
         println!("{:#?}", costs);

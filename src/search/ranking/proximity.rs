@@ -1,66 +1,189 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ops::{ControlFlow, RangeInclusive};
+use std::time::Instant;
 use roaring::RoaringBitmap;
 use crate::search::context::Context;
-use crate::search::query_graph::QueryGraph;
+use crate::search::query_graph::{NodeData, QueryGraph};
+use crate::search::ranking::path_visitor::{Edge, PathVisitor};
 use crate::search::ranking::proximity_cost::paths_cost;
 use crate::search::ranking::ranking_rule::{RankingRule, RankingRuleOutput};
-use crate::search::ranking::score::{Rank, ScoreDetails};
-use crate::search::ranking::typos::TypoRule;
-use crate::search::resolve_query_graph::resolve_path_docids;
+use crate::search::resolve_query_graph::{resolve_docids, resolve_docids_proximity};
 use crate::search::utils::bit_set::BitSet;
-use crate::search::utils::vec_map::VecMap;
+use crate::Result;
+use crate::score_details::{Rank, ScoreDetails};
 
-pub struct ProximityRule {
-    costs: VecMap<HashMap<BitSet, RoaringBitmap>>,
-    max_cost: u32
+pub struct ProximityRule<'graph> {
+    edge_docids: HashMap<Edge, RoaringBitmap>,
+    path_visitor: PathVisitor<'graph>,
+    cur_cost: RangeInclusive<usize>,
+    candidates: RoaringBitmap,
+    max_cost: usize
 }
 
-impl ProximityRule {
-    pub fn new(context: &mut impl Context, graph: &QueryGraph) -> heed::Result<Self>{
-        let paths = paths_cost(graph, context)?;
+impl<'graph> ProximityRule<'graph> {
+    pub fn new(context: &mut impl Context, graph: &'graph QueryGraph) -> Result<Self>{
+        let costs = paths_cost(graph, context)?;
         let max_cost = Self::max_cost(context, graph)?;
-        let mut costs = VecMap::with_capacity(paths.len());
-        for (cost, path) in paths.into_key_value(){
-            costs
-                .get_or_insert_with(cost, || HashMap::new())
-                .extend(path.into_iter().map(|(_, path, docids)| (path, docids)));
-        }
-        println!("PROX Costs {:?}", costs);
-        Ok(ProximityRule{ costs, max_cost })
+        let path_visitor = PathVisitor::new(graph, costs, None);
+
+        Ok(ProximityRule{ edge_docids: HashMap::new(), cur_cost: max_cost..=max_cost, candidates: RoaringBitmap::new(), max_cost, path_visitor })
     }
-    pub fn max_cost(_: &impl Context, graph: &QueryGraph) -> heed::Result<u32>{
-        Ok(((graph.query_word - 1) * 10) as u32)
+    pub fn max_cost(_: &impl Context, graph: &QueryGraph) -> Result<usize>{
+        Ok((graph.query_word - 1) * 4)
     }
 }
 
 
-impl RankingRule for ProximityRule {
+impl<'graph> RankingRule for ProximityRule<'graph> {
+    fn start_iteration(&mut self, _ctx: &mut dyn Context, candidates: RoaringBitmap, allowed_paths: Option<HashSet<BitSet>>) -> Result<()> {
+        self.candidates = candidates;
+        self.path_visitor.set_allowed_paths(allowed_paths);
+        self.cur_cost = 0..=self.max_cost;
 
-    fn buckets(&self, candidates: Option<Vec<(BitSet, RoaringBitmap)>>) -> Box<dyn Iterator<Item=RankingRuleOutput> + '_> {
-        if let Some(candidates) = candidates{
-            Box::new(self.costs.key_value().map(move |(cost, paths)| {
-                let mut new_candidates = Vec::new();
-                for (path, docids) in &candidates{
-                    if let Some(path_docids) = paths.get(&path){
-                        new_candidates.push((*path, path_docids & docids));
+        Ok(())
+    }
+
+    fn next_bucket(&mut self, ctx: &mut dyn Context) -> Result<Option<RankingRuleOutput>> {
+        self.cur_cost.next().map(|cost| -> Result<RankingRuleOutput> {
+            let mut subpaths_docids: Vec<(Edge, RoaringBitmap)> = vec![];
+            let mut good_paths = HashSet::new();
+            let mut bucket = RoaringBitmap::new();
+            let query_graph = self.path_visitor.query_graph();
+            let mut time = Instant::now();
+            self.path_visitor.visit_paths(cost, |path|{
+                println!("Path found {:?}", time.elapsed());
+                if self.candidates.is_empty() {
+                    return Ok(ControlFlow::Break(()));
+                }
+
+                let idx_of_first_different_condition = {
+                    let mut idx = 0;
+                    for (&last_c, cur_c) in path.iter().zip(subpaths_docids.iter().map(|x| x.0)) {
+                        if last_c == cur_c {
+                            idx += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    subpaths_docids.truncate(idx);
+                    idx
+                };
+
+                for latest_edge in path[idx_of_first_different_condition..].iter().copied() {
+                    let success = visit_path_edge(
+                        ctx,
+                        &query_graph,
+                        &self.candidates,
+                        &mut self.edge_docids,
+                        &mut subpaths_docids,
+                        latest_edge,
+                    )?;
+                    if !success {
+                        return Ok(ControlFlow::Continue(()));
                     }
                 }
-                RankingRuleOutput{
-                    score: ScoreDetails::Proximity(Rank{
-                        rank: cost as u32,
-                        max_rank: self.max_cost
-                    }),
-                    candidates: new_candidates
+
+                let path_docids =
+                    subpaths_docids.pop().map(|x| x.1).unwrap_or_else(|| self.candidates.clone());
+
+                let mut path_bitset = BitSet::new();
+                for edge in path{
+                    path_bitset.insert(edge.from);
                 }
-            }))
-        } else {
-            Box::new(self.costs.key_value().map(|(cost, path)| RankingRuleOutput{
+                good_paths.insert(path_bitset);
+
+                bucket |= &path_docids;
+
+                self.candidates -= &path_docids;
+                for (_, docids) in subpaths_docids.iter_mut() {
+                    *docids -= &path_docids;
+                }
+
+                if self.candidates.is_empty() {
+                    time = Instant::now();
+                    Ok(ControlFlow::Break(()))
+                } else {
+                    time = Instant::now();
+                    Ok(ControlFlow::Continue(()))
+                }
+
+            })?;
+
+            Ok(RankingRuleOutput{
                 score: ScoreDetails::Proximity(Rank{
                     rank: cost as u32,
-                    max_rank: self.max_cost
+                    max_rank: self.max_cost as u32
                 }),
-                candidates: path.iter().map(|(key, value)| (*key, value.clone())).collect()
-            }))
-        }
+                allowed_path: good_paths,
+                candidates: bucket
+            })
+
+        }).transpose()
+
     }
+}
+
+
+fn visit_path_edge(
+    ctx: &mut (impl Context + ?Sized),
+    graph: &QueryGraph,
+    candidates: &RoaringBitmap,
+    edge_docids: &mut HashMap<Edge, RoaringBitmap>,
+    subpath: &mut Vec<(Edge, RoaringBitmap)>,
+    latest_edge: Edge,
+) -> Result<bool> {
+    let edge_docids = get_edge_docids(edge_docids, ctx, latest_edge, graph)?;
+    if edge_docids.is_empty() {
+        return Ok(false);
+    }
+
+    let latest_path_docids = if let Some((_, prev_docids)) = subpath.last() {
+        prev_docids & edge_docids
+    } else {
+        candidates & edge_docids
+    };
+    if !latest_path_docids.is_empty() {
+        subpath.push((latest_edge, latest_path_docids));
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+fn resolve_edge(ctx: &mut (impl Context + ?Sized), edge: Edge, graph: &QueryGraph) -> Result<RoaringBitmap>{
+    let left = &graph.nodes[edge.from].data;
+    let right = &graph.nodes[edge.to].data;
+
+    return match (left,right) {
+        (NodeData::Start, NodeData::Term(term)) | (NodeData::Term(term), NodeData::End) => {
+            let docids = resolve_docids(term, ctx)?;
+            Ok(docids)
+        }
+        (NodeData::Start, NodeData::End) => {
+            let docids = ctx.all_docids()?;
+            Ok(docids)
+        }
+        (NodeData::Term(left_term), NodeData::Term(right_term)) => {
+            let res = resolve_docids_proximity(ctx, left_term, right_term, edge.cost as u8)?;
+            Ok(res)
+        }
+        _ => unreachable!()
+    };
+}
+
+pub fn get_edge_docids<'s>(
+    cache: &'s mut HashMap<Edge, RoaringBitmap>,
+    ctx: &mut (impl Context + ?Sized),
+    edge: Edge,
+    graph: &QueryGraph,
+) -> Result<&'s RoaringBitmap> {
+    if cache.contains_key(&edge) {
+        let docids = cache.get_mut(&edge).unwrap();
+        return Ok(docids);
+    }
+    let edge_docids = resolve_edge(ctx, edge, graph)?;
+
+    let _ = cache.insert(edge, edge_docids);
+    let edge_docids = &cache[&edge];
+    Ok(edge_docids)
 }

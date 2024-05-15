@@ -10,29 +10,21 @@ pub enum ScoreDetails {
     Words(Words),
     Typo(Typo),
     Proximity(Rank),
-    Fid(Rank),
-    Position(Rank),
-    ExactAttribute(ExactAttribute),
-    ExactWords(ExactWords),
+    Exactness(ExactWords),
+    Attribute(Rank),
     Sort(Sort),
     Vector(Vector),
-    GeoSort(GeoSort),
-
-    /// Returned when we don't have the time to finish applying all the subsequent ranking-rules
-    Skipped,
 }
 
 #[derive(Clone, Copy)]
 pub enum ScoreValue<'a> {
     Score(f64),
     Sort(&'a Sort),
-    GeoSort(&'a GeoSort),
 }
 
 enum RankOrValue<'a> {
     Rank(Rank),
     Sort(&'a Sort),
-    GeoSort(&'a GeoSort),
     Score(f64),
 }
 
@@ -46,14 +38,10 @@ impl ScoreDetails {
             ScoreDetails::Words(details) => Some(details.rank()),
             ScoreDetails::Typo(details) => Some(details.rank()),
             ScoreDetails::Proximity(details) => Some(*details),
-            ScoreDetails::Fid(details) => Some(*details),
-            ScoreDetails::Position(details) => Some(*details),
-            ScoreDetails::ExactAttribute(details) => Some(details.rank()),
-            ScoreDetails::ExactWords(details) => Some(details.rank()),
+            ScoreDetails::Attribute(details) => Some(*details),
+            ScoreDetails::Exactness(details) => Some(details.rank()),
             ScoreDetails::Sort(_) => None,
-            ScoreDetails::GeoSort(_) => None,
             ScoreDetails::Vector(_) => None,
-            ScoreDetails::Skipped => Some(Rank { rank: 0, max_rank: 1 }),
         }
     }
 
@@ -82,7 +70,6 @@ impl ScoreDetails {
             .map(|rank_or_value| match rank_or_value {
                 RankOrValue::Rank(r) => ScoreValue::Score(r.local_score()),
                 RankOrValue::Sort(s) => ScoreValue::Sort(s),
-                RankOrValue::GeoSort(g) => ScoreValue::GeoSort(g),
                 RankOrValue::Score(s) => ScoreValue::Score(s),
             })
     }
@@ -92,28 +79,19 @@ impl ScoreDetails {
             ScoreDetails::Words(w) => RankOrValue::Rank(w.rank()),
             ScoreDetails::Typo(t) => RankOrValue::Rank(t.rank()),
             ScoreDetails::Proximity(p) => RankOrValue::Rank(*p),
-            ScoreDetails::Fid(f) => RankOrValue::Rank(*f),
-            ScoreDetails::Position(p) => RankOrValue::Rank(*p),
-            ScoreDetails::ExactAttribute(e) => RankOrValue::Rank(e.rank()),
-            ScoreDetails::ExactWords(e) => RankOrValue::Rank(e.rank()),
+            ScoreDetails::Attribute(f) => RankOrValue::Rank(*f),
+            ScoreDetails::Exactness(e) => RankOrValue::Rank(e.rank()),
             ScoreDetails::Sort(sort) => RankOrValue::Sort(sort),
-            ScoreDetails::GeoSort(geosort) => RankOrValue::GeoSort(geosort),
             ScoreDetails::Vector(vector) => {
                 RankOrValue::Score(vector.similarity.as_ref().map(|s| *s as f64).unwrap_or(0.0f64))
             }
-            ScoreDetails::Skipped => RankOrValue::Rank(Rank { rank: 0, max_rank: 1 }),
         }
     }
 
-    /// Panics
-    ///
-    /// - If Position is not preceded by Fid
-    /// - If Exactness is not preceded by ExactAttribute
     pub fn to_json_map<'a>(
         details: impl Iterator<Item = &'a Self>,
     ) -> serde_json::Map<String, serde_json::Value> {
         let mut order = 0;
-        let mut fid_details = None;
         let mut details_map = serde_json::Map::default();
         for details in details {
             match details {
@@ -145,105 +123,30 @@ impl ScoreDetails {
                     details_map.insert("proximity".into(), proximity_details);
                     order += 1;
                 }
-                ScoreDetails::Fid(fid) => {
-                    // copy the rank for future use in Position.
-                    fid_details = Some(*fid);
-                    // For now, fid is a virtual rule always followed by the "position" rule
+                ScoreDetails::Attribute(fid) => {
                     let fid_details = serde_json::json!({
                         "order": order,
-                        "attributeRankingOrderScore": fid.local_score(),
+                        "score": fid.local_score(),
                     });
                     details_map.insert("attribute".into(), fid_details);
                     order += 1;
                 }
-                ScoreDetails::Position(position) => {
-                    // For now, position is a virtual rule always preceded by the "fid" rule
-                    let attribute_details = details_map
-                        .get_mut("attribute")
-                        .expect("position not preceded by attribute");
-                    let attribute_details = attribute_details
-                        .as_object_mut()
-                        .expect("attribute details was not an object");
-                    let Some(fid_details) = fid_details else {
-                        unimplemented!("position not preceded by attribute");
-                    };
-
-                    attribute_details
-                        .insert("queryWordDistanceScore".into(), position.local_score().into());
-                    let score = Rank::global_score([fid_details, *position].iter().copied());
-                    attribute_details.insert("score".into(), score.into());
-
-                    // do not update the order since this was already done by fid
-                }
-                ScoreDetails::ExactAttribute(exact_attribute) => {
+                ScoreDetails::Exactness(exact_words) => {
                     let exactness_details = serde_json::json!({
                         "order": order,
-                        "matchType": exact_attribute,
-                        "score": exact_attribute.rank().local_score(),
+                        "matchingWords": exact_words.matching_words,
+                        "maxMatchingWords": exact_words.max_matching_words,
+                        "score": exact_words.rank().local_score(),
                     });
                     details_map.insert("exactness".into(), exactness_details);
                     order += 1;
                 }
-                ScoreDetails::ExactWords(details) => {
-                    // For now, exactness is a virtual rule always preceded by the "ExactAttribute" rule
-                    let exactness_details = details_map
-                        .get_mut("exactness")
-                        .expect("Exactness not preceded by exactAttribute");
-                    let exactness_details = exactness_details
-                        .as_object_mut()
-                        .expect("exactness details was not an object");
-                    if exactness_details.get("matchType").expect("missing 'matchType'")
-                        == &serde_json::json!(ExactAttribute::NoExactMatch)
-                    {
-                        let score = Rank::global_score(
-                            [ExactAttribute::NoExactMatch.rank(), details.rank()].iter().copied(),
-                        );
-                        // tiny detail, but we want the score to be the last displayed field,
-                        // so we're removing it here, adding the other fields, then adding the new score
-                        exactness_details.remove("score");
-                        exactness_details
-                            .insert("matchingWords".into(), details.matching_words.into());
-                        exactness_details
-                            .insert("maxMatchingWords".into(), details.max_matching_words.into());
-                        exactness_details.insert("score".into(), score.into());
-                    }
-                    // do not update the order since this was already done by exactAttribute
-                }
                 ScoreDetails::Sort(details) => {
-                    let sort = if details.redacted {
-                        format!("<hidden-rule-{order}>")
-                    } else {
-                        format!(
-                            "{}:{}",
-                            details.field_name,
-                            if details.ascending { "asc" } else { "desc" }
-                        )
-                    };
-                    let value =
-                        if details.redacted { "<hidden>".into() } else { details.value.clone() };
+                    let sort = format!("{}:{}", details.field_name, if details.ascending { "asc" } else { "desc" });
+                    let value = details.value.clone() ;
                     let sort_details = serde_json::json!({
                         "order": order,
                         "value": value,
-                    });
-                    details_map.insert(sort, sort_details);
-                    order += 1;
-                }
-                ScoreDetails::GeoSort(details) => {
-                    let sort = format!(
-                        "_geoPoint({}, {}):{}",
-                        details.target_point[0],
-                        details.target_point[1],
-                        if details.ascending { "asc" } else { "desc" }
-                    );
-                    let point = if let Some(value) = details.value {
-                        serde_json::json!({ "lat": value[0], "lng": value[1]})
-                    } else {
-                        serde_json::Value::Null
-                    };
-                    let sort_details = serde_json::json!({
-                        "order": order,
-                        "value": point,
-                        "distance": details.distance(),
                     });
                     details_map.insert(sort, sort_details);
                     order += 1;
@@ -258,26 +161,13 @@ impl ScoreDetails {
                     details_map.insert("vectorSort".into(), details);
                     order += 1;
                 }
-                ScoreDetails::Skipped => {
-                    details_map
-                        .insert("skipped".to_string(), serde_json::json!({ "order": order }));
-                    order += 1;
-                }
             }
         }
         details_map
     }
 }
 
-/// The strategy to compute scores.
-///
-/// It makes sense to pass down this strategy to the internals of the search, because
-/// some optimizations (today, mainly skipping ranking rules for universes of a single document)
-/// are not correct to do when computing the scores.
-///
-/// This strategy could feasibly be extended to differentiate between the normalized score and the
-/// detailed scores, but it is not useful today as the normalized score is *derived from* the
-/// detailed scores.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScoringStrategy {
     /// Don't compute scores
@@ -396,30 +286,11 @@ impl Rank {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ExactAttribute {
-    ExactMatch,
-    MatchesStart,
-    NoExactMatch,
-}
-
-impl ExactAttribute {
-    pub fn rank(&self) -> Rank {
-        let rank = match self {
-            ExactAttribute::ExactMatch => 3,
-            ExactAttribute::MatchesStart => 2,
-            ExactAttribute::NoExactMatch => 1,
-        };
-        Rank { rank, max_rank: 3 }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sort {
     pub field_name: String,
     pub ascending: bool,
-    pub redacted: bool,
     pub value: serde_json::Value,
 }
 
@@ -457,45 +328,8 @@ impl PartialOrd for Sort {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GeoSort {
-    pub target_point: [f64; 2],
-    pub ascending: bool,
-    pub value: Option<[f64; 2]>,
-}
-
-impl PartialOrd for GeoSort {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.target_point != other.target_point {
-            return None;
-        }
-        if self.ascending != other.ascending {
-            return None;
-        }
-        Some(match (self.distance(), other.distance()) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (Some(left), Some(right)) => {
-                let order = left.partial_cmp(&right)?;
-                if self.ascending {
-                    // when ascending, the one with the smallest distance has the best score
-                    order.reverse()
-                } else {
-                    order
-                }
-            }
-        })
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Vector {
     pub similarity: Option<f32>,
 }
 
-impl GeoSort {
-    pub fn distance(&self) -> Option<f64> {
-        self.value.map(|value| distance_between_two_points(&self.target_point, &value))
-    }
-}

@@ -25,7 +25,7 @@ use crate::proximity::ProximityPrecision;
 use crate::vector::EmbeddingConfig;
 use crate::{
     default_criteria, CboRoaringBitmapCodec, Criterion, DocumentId, ExternalDocumentsIds,
-     FieldDistribution, FieldId, FieldIdWordCountCodec, GeoPoint, ObkvCodec,
+     FieldDistribution, FieldId, FieldIdWordCountCodec, ObkvCodec,
     Result, RoaringBitmapCodec, RoaringBitmapLenCodec, Search, U8StrStrCodec, BEU16, BEU32, BEU64,
 };
 use crate::search::facet::FacetDistribution;

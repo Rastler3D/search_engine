@@ -26,7 +26,7 @@ use crate::update::index_documents::helpers::{
     as_cloneable_grenad, keep_latest_obkv, try_split_array_at,
 };
 use crate::{
-    lat_lng_to_xyz, DocumentId, FieldId, GeoPoint, Index, InternalError, Result, SerializationError,
+    lat_lng_to_xyz, DocumentId, FieldId,  Index, InternalError, Result, SerializationError,
 };
 
 /// This struct accumulates and group the TypedChunks
@@ -713,14 +713,7 @@ pub(crate) fn write_typed_chunk_into_index(
     Ok((RoaringBitmap::new(), is_merged_database))
 }
 
-/// Converts the latitude and longitude back to an xyz GeoPoint.
-fn extract_geo_point(value: &[u8], docid: DocumentId) -> GeoPoint {
-    let (lat, tail) = helpers::try_split_array_at::<u8, 8>(value).unwrap();
-    let (lng, _) = helpers::try_split_array_at::<u8, 8>(tail).unwrap();
-    let point = [f64::from_ne_bytes(lat), f64::from_ne_bytes(lng)];
-    let xyz_point = lat_lng_to_xyz(&point);
-    GeoPoint::new(xyz_point, (docid, point))
-}
+
 
 fn merge_word_docids_reader_into_fst(
     merger: Merger<CursorClonableMmap, MergeFn>,
