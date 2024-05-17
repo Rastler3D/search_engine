@@ -1,5 +1,5 @@
 use std::cmp::{Ordering, Reverse};
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, BTreeSet};
 use std::ops::ControlFlow;
 
 use charabia::normalizer::NormalizerOption;
@@ -11,8 +11,10 @@ use tracing::error;
 
 use crate::error::UserError;
 use crate::heed_codec::facet::{FacetGroupKey, FacetGroupValue};
-use crate::search::build_dfa;
 use crate::{DocumentId, FieldId, OrderBy, Result, Search};
+use crate::search::query_graph::{LEVDIST0, LEVDIST1, LEVDIST2};
+use crate::update::typo_config;
+
 
 /// The maximum number of values per facet returned by the facet search route.
 const DEFAULT_MAX_NUMBER_OF_VALUES_PER_FACET: usize = 100;
@@ -68,13 +70,10 @@ impl<'a> SearchForFacetValues<'a> {
 
         let filterable_fields = index.filterable_fields(rtxn)?;
         if !filterable_fields.contains(&self.facet) {
-            let (valid_fields, hidden_fields) =
-                index.remove_hidden_fields(rtxn, filterable_fields)?;
 
             return Err(UserError::InvalidFacetSearchFacetName {
                 field: self.facet.clone(),
-                valid_fields,
-                hidden_fields,
+                valid_fields: BTreeSet::from_iter(filterable_fields),
             }
             .into());
         }
@@ -112,70 +111,28 @@ impl<'a> SearchForFacetValues<'a> {
                 let options = NormalizerOption { lossy: true, ..Default::default() };
                 let query = query.normalize(&options);
                 let query = query.as_ref();
+                let typo_config = self.search_query.index.typo_config(self.search_query.rtxn)?;
+                let typos_allowed = typo_config.allowed_typos(query);
+                let automaton = match typos_allowed {
+                    0 => LEVDIST0.build_prefix_dfa(query),
+                    1 => LEVDIST1.build_prefix_dfa(query),
+                    _ => LEVDIST2.build_prefix_dfa(query)
+                };
 
-                let authorize_typos = self.search_query.index.authorize_typos(rtxn)?;
-                let field_authorizes_typos =
-                    !self.search_query.index.exact_attributes_ids(rtxn)?.contains(&fid);
-
-                if authorize_typos && field_authorizes_typos {
-                    let exact_words_fst = self.search_query.index.exact_words(rtxn)?;
-                    if exact_words_fst.map_or(false, |fst| fst.contains(query)) {
-                        if fst.contains(query) {
-                            self.fetch_original_facets_using_normalized(
-                                fid,
-                                query,
-                                query,
-                                &search_candidates,
-                                &mut results,
-                            )?;
-                        }
-                    } else {
-                        let one_typo = self.search_query.index.min_word_len_one_typo(rtxn)?;
-                        let two_typos = self.search_query.index.min_word_len_two_typos(rtxn)?;
-
-                        let is_prefix = true;
-                        let automaton = if query.len() < one_typo as usize {
-                            build_dfa(query, 0, is_prefix)
-                        } else if query.len() < two_typos as usize {
-                            build_dfa(query, 1, is_prefix)
-                        } else {
-                            build_dfa(query, 2, is_prefix)
-                        };
-
-                        let mut stream = fst.search(automaton).into_stream();
-                        while let Some(facet_value) = stream.next() {
-                            let value = std::str::from_utf8(facet_value)?;
-                            if self
-                                .fetch_original_facets_using_normalized(
-                                    fid,
-                                    value,
-                                    query,
-                                    &search_candidates,
-                                    &mut results,
-                                )?
-                                .is_break()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    let automaton = Str::new(query).starts_with();
-                    let mut stream = fst.search(automaton).into_stream();
-                    while let Some(facet_value) = stream.next() {
-                        let value = std::str::from_utf8(facet_value)?;
-                        if self
-                            .fetch_original_facets_using_normalized(
-                                fid,
-                                value,
-                                query,
-                                &search_candidates,
-                                &mut results,
-                            )?
-                            .is_break()
-                        {
-                            break;
-                        }
+                let mut stream = fst.search(automaton).into_stream();
+                while let Some(facet_value) = stream.next() {
+                    let value = std::str::from_utf8(facet_value)?;
+                    if self
+                        .fetch_original_facets_using_normalized(
+                            fid,
+                            value,
+                            query,
+                            &search_candidates,
+                            &mut results,
+                        )?
+                        .is_break()
+                    {
+                        break;
                     }
                 }
             }

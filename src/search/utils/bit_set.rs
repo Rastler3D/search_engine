@@ -11,6 +11,14 @@ pub struct BitSet<STORAGE = [u64;2]>{
 impl BitSet<Vec<u64>>{
 
     #[inline]
+    pub fn new_vec() -> Self {
+        Self{
+            len: 0,
+            inner: vec![]
+        }
+    }
+
+    #[inline]
     pub fn init(value: bool, len: usize) -> BitSet<Vec<u64>>{
         let last = 2u64.pow((len % 64) as u32) - 1;
         let size = len / 64 + 1;
@@ -191,6 +199,59 @@ impl <T: Default> BitSet<T> {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+}
+
+impl BitSet<Vec<u64>> {
+    #[inline]
+    pub fn is_disjoint(&self, other: &BitSet) -> bool {
+        (*self.inner).bit_disjoint(&other.inner)
+    }
+
+    #[inline]
+    pub fn is_subset(&self, other: &BitSet) -> bool {
+        (*self.inner).bit_subset(&other.inner)
+    }
+    #[inline]
+    pub fn is_superset(&self, other: &BitSet) -> bool {
+        (*self.inner).bit_superset(&other.inner)
+    }
+
+    #[inline]
+    pub fn intersection(&mut self, other: &BitSet) -> &mut Self {
+        let other_len = other.inner.len();
+        let len = self.inner.len();
+        if len <= other_len {
+            self.inner.extend((0..other_len - len + 1 ).map(|_| 0));
+        }
+        (*self.inner).bit_and(&other.inner);
+        self.len = self.inner.bit_count();
+        self
+    }
+
+    #[inline]
+    pub fn union(&mut self, other: &BitSet) -> &mut Self{
+        let other_len = other.inner.len();
+        let len = self.inner.len();
+        if len <= other_len {
+            self.inner.extend((0..other_len - len + 1 ).map(|_| 0));
+        }
+        (*self.inner).bit_or(&other.inner);
+        self.len = self.inner.bit_count();
+        self
+    }
+
+    #[inline]
+    pub fn difference(&mut self, other: &BitSet) -> &mut Self{
+        let other_len = other.inner.len();
+        let len = self.inner.len();
+        if len <= other_len {
+            self.inner.extend((0..other_len - len + 1 ).map(|_| 0));
+        }
+        (*self.inner).bit_andnot(&other.inner);
+        self.len = self.inner.bit_count();
+        self
+    }
+
 }
 
 impl BitSet<[u64;2]> {

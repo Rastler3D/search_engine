@@ -2,39 +2,57 @@ use std::collections::{HashMap, HashSet};
 use std::ops::{ControlFlow, RangeInclusive};
 use std::time::Instant;
 use roaring::RoaringBitmap;
-use crate::search::context::Context;
+use smallvec::SmallVec;
+use crate::search::context::{Context, Fid};
 use crate::search::query_graph::{NodeData, QueryGraph};
 use crate::search::ranking::path_visitor::{Edge, EdgeToCost, PathVisitor};
-use crate::search::ranking::proximity_cost::paths_cost;
 use crate::search::ranking::ranking_rule::{RankingRule, RankingRuleOutput};
-use crate::search::resolve_query_graph::{resolve_docids, resolve_docids_proximity};
+use crate::search::resolve_query_graph::{resolve_docids, resolve_docids_proximity, resolve_fid_docids};
 use crate::search::utils::bit_set::BitSet;
-use crate::Result;
-use crate::score_details::{Proximity, Rank, ScoreDetails};
+use crate::{FieldId, Result};
+use crate::score_details::{Attribute, ScoreDetails};
+use crate::search::ranking::attribute_cost::{MAX_ATTRIBUTE, paths_cost};
+use crate::search::utils::vec_map::VecMap;
 
-pub struct ProximityRule<'graph> {
+pub struct AttributeRule<'graph> {
     edge_docids: HashMap<Edge, RoaringBitmap>,
-    path_visitor: PathVisitor<'graph>,
+    path_visitor: PathVisitor<'graph, AttributeCost, SmallVec<[BitSet; MAX_ATTRIBUTE]>>,
+    cost_field_id_mapping: VecMap<FieldId>,
     cur_cost: RangeInclusive<usize>,
     candidates: RoaringBitmap,
     max_cost: usize
 }
 
-impl<'graph> ProximityRule<'graph> {
+impl<'graph> AttributeRule<'graph> {
     pub fn new(context: &mut impl Context, graph: &'graph QueryGraph) -> Result<Self>{
         let costs = paths_cost(graph, context)?;
         let max_cost = Self::max_cost(context, graph)?;
         let path_visitor = PathVisitor::new(graph, costs, None);
-
-        Ok(ProximityRule{ edge_docids: HashMap::new(), cur_cost: max_cost+1..=max_cost, candidates: RoaringBitmap::new(), max_cost, path_visitor })
+        let cost_field_id_mapping = if let Some(searchable_field) = context.searchable_fields_ids()?{
+            (0..).zip(searchable_field).collect::<VecMap<_>>()
+        } else {
+            (0..).zip(0..=max_cost as FieldId).collect::<VecMap<_>>()
+        };
+        Ok(AttributeRule{ edge_docids: HashMap::new(), cur_cost: max_cost+1..=max_cost, candidates: RoaringBitmap::new(), max_cost, path_visitor, cost_field_id_mapping })
     }
-    pub fn max_cost(_: &impl Context, graph: &QueryGraph) -> Result<usize>{
-        Ok((graph.query_terms.saturating_sub(1)) * 4)
+    pub fn max_cost(context: &mut impl Context, graph: &QueryGraph) -> Result<usize>{
+        let max_cost: usize = {
+            if let Some(attributes) = context
+                .searchable_fields_ids()?
+                .map(|x| x.len())
+            {
+                attributes.saturating_sub(1)
+            } else {
+                context.field_ids()?.ids().max().unwrap_or_default() as usize
+            }
+        };
+
+        Ok((graph.query_words) * max_cost)
     }
 }
 
 
-impl<'graph> RankingRule for ProximityRule<'graph> {
+impl<'graph> RankingRule for AttributeRule<'graph> {
     fn start_iteration(&mut self, _ctx: &mut dyn Context, candidates: RoaringBitmap, allowed_paths: Option<HashSet<BitSet>>) -> Result<()> {
         self.candidates = candidates;
         self.path_visitor.set_allowed_paths(allowed_paths);
@@ -76,7 +94,8 @@ impl<'graph> RankingRule for ProximityRule<'graph> {
                         &self.candidates,
                         &mut self.edge_docids,
                         &mut subpaths_docids,
-                        latest_edge,
+                        &self.cost_field_id_mapping,
+                        latest_edge
                     )?;
                     if !success {
                         return Ok(ControlFlow::Continue(()));
@@ -111,9 +130,9 @@ impl<'graph> RankingRule for ProximityRule<'graph> {
             })?;
 
             Ok(RankingRuleOutput{
-                score: ScoreDetails::Proximity(Proximity{
-                    proximity: cost as u32,
-                    max_proximity: self.max_cost as u32
+                score: ScoreDetails::Attribute(Attribute{
+                    attribute: cost as u32,
+                    max_attribute: self.max_cost as u32
                 }),
                 allowed_path: Some(good_paths),
                 candidates: bucket
@@ -131,9 +150,10 @@ fn visit_path_edge(
     candidates: &RoaringBitmap,
     edge_docids: &mut HashMap<Edge, RoaringBitmap>,
     subpath: &mut Vec<(Edge, RoaringBitmap)>,
+    mapping: &VecMap<Fid>,
     latest_edge: Edge,
 ) -> Result<bool> {
-    let edge_docids = get_edge_docids(edge_docids, ctx, latest_edge, graph)?;
+    let edge_docids = get_edge_docids(edge_docids, ctx, latest_edge, graph, mapping)?;
     if edge_docids.is_empty() {
         return Ok(false);
     }
@@ -151,24 +171,17 @@ fn visit_path_edge(
     Ok(false)
 }
 
-fn resolve_edge(ctx: &mut (impl Context + ?Sized), edge: Edge, graph: &QueryGraph) -> Result<RoaringBitmap>{
-    let left = &graph.nodes[edge.from].data;
+fn resolve_edge(ctx: &mut (impl Context + ?Sized), edge: Edge, graph: &QueryGraph, mapping: &VecMap<Fid>) -> Result<RoaringBitmap>{
     let right = &graph.nodes[edge.to].data;
-
-    return match (left,right) {
-        (NodeData::Start, NodeData::Term(term)) | (NodeData::Term(term), NodeData::End) => {
-            let docids = resolve_docids(term, ctx)?;
+    return match right {
+        NodeData::Term(term) => {
+            let docids = resolve_fid_docids(term, ctx, mapping[edge.cost])?;
             Ok(docids)
         }
-        (NodeData::Start, NodeData::End) => {
+        (NodeData::Start | NodeData::End) => {
             let docids = ctx.all_docids()?;
             Ok(docids)
         }
-        (NodeData::Term(left_term), NodeData::Term(right_term)) => {
-            let res = resolve_docids_proximity(ctx, left_term, right_term, edge.cost as u8)?;
-            Ok(res)
-        }
-        _ => unreachable!()
     };
 }
 
@@ -177,21 +190,25 @@ pub fn get_edge_docids<'s>(
     ctx: &mut (impl Context + ?Sized),
     edge: Edge,
     graph: &QueryGraph,
+    mapping: &VecMap<Fid>
 ) -> Result<&'s RoaringBitmap> {
     if cache.contains_key(&edge) {
         let docids = cache.get_mut(&edge).unwrap();
         return Ok(docids);
     }
-    let edge_docids = resolve_edge(ctx, edge, graph)?;
+    let edge_docids = resolve_edge(ctx, edge, graph, mapping)?;
 
     let _ = cache.insert(edge, edge_docids);
     let edge_docids = &cache[&edge];
     Ok(edge_docids)
 }
 
-pub struct ProximityCost;
-impl EdgeToCost for ProximityCost {
-    fn to_cost(edge: usize, _: usize, _: &QueryGraph) -> usize {
-        edge
+struct AttributeCost;
+impl EdgeToCost for AttributeCost {
+    fn to_cost(edge: usize, node_id: usize, graph: &QueryGraph) -> usize {
+        match &graph.nodes[node_id].data{
+            NodeData::Start | NodeData::End => edge,
+            NodeData::Term(term) => edge * term.position.clone().count()
+        }
     }
 }

@@ -37,7 +37,7 @@ impl Default for TypoConfig {
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Deserr)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 #[deserr(rename_all = camelCase, deny_unknown_fields)]
-pub struct TypoSetting{
+pub struct TypoSettings {
     #[serde(default, skip_serializing_if = "Setting::is_not_set")]
     #[deserr(default)]
     pub max_typos: Setting<u32>,

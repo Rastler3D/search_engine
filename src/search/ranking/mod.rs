@@ -1,9 +1,13 @@
 mod paths_cost;
-//mod attribute_cost;
 mod proximity_cost;
-mod ranking_rule;
-//mod proximity;
+pub mod ranking_rule;
 mod path_visitor;
 mod proximity;
-mod bucket_sort;
-//mod typos;
+pub mod bucket_sort;
+mod attribute_cost;
+mod attribute;
+mod typos;
+mod exactness;
+mod words;
+mod vector_sort;
+mod sort;

@@ -1,7 +1,5 @@
-use std::collections::BTreeSet;
-use std::ops::RangeInclusive;
 use roaring::RoaringBitmap;
-use crate::search::context::{Context, Fid, Position};
+use crate::search::context::{Context, Fid};
 use crate::search::query_graph::{GraphNode, NodeData, QueryGraph};
 use crate::search::query_parser::{DerivativeTerm, OriginalTerm, Term, TermKind};
 use crate::search::utils::bit_set::BitSet;
@@ -44,51 +42,9 @@ pub fn resolve_node_docids(node: &GraphNode, context: &mut impl Context) -> Resu
     }
 }
 
-// pub fn resolve_positions(term: &Term, context: &impl Context) -> Result<Vec<((Fid,Position), RoaringBitmap)>>{
-//     match &term {
-//
-//         Term{ term_kind:
-//             TermKind::Normal(OriginalTerm::Word(word)) |
-//             TermKind::Exact(OriginalTerm::Word(word)) |
-//             TermKind::Derivative(DerivativeTerm::Ngram(word, ..), ..), ..
-//         } => {
-//             context.word_position_docids(word)
-//         },
-//         Term{ term_kind:
-//             TermKind::Normal(OriginalTerm::Prefix(prefix)) |
-//             TermKind::Exact(OriginalTerm::Prefix(prefix)), ..
-//         } => {
-//             context.prefix_position_docids(prefix)
-//         },
-//         Term{ term_kind:
-//             TermKind::Normal(OriginalTerm::Phrase(phrase)) |
-//             TermKind::Exact(OriginalTerm::Phrase(phrase)), ..
-//         } => {
-//             phrase_position_resolve(phrase, context)
-//         },
-//         Term{ term_kind: TermKind::Derivative(DerivativeTerm::Typo(words, ..) | DerivativeTerm::Synonym(words), ..) , .. } => {
-//             let mut result = Vec::new();
-//             for word in words{
-//                 result.extend(context.word_position_docids(word)?);
-//             }
-//
-//             Ok(result)
-//         },
-//         Term{ term_kind: TermKind::Derivative(DerivativeTerm::Split(words, .. ), ..), .. } => {
-//             let mut result = Vec::new();
-//             for word in words{
-//                 result.extend(split_position_resolve(word, context)?);
-//             }
-//
-//             Ok(result)
-//         },
-//         _ => todo!(),
-//         }
-// }
 
 pub fn resolve_docids(term: &Term, context: &mut (impl Context + ?Sized)) -> Result<RoaringBitmap>{
-    match &term {
-
+    match term {
         Term{ term_kind:
         TermKind::Normal(OriginalTerm::Word(word)) |
         TermKind::Exact(OriginalTerm::Word(word)) |
@@ -106,7 +62,7 @@ pub fn resolve_docids(term: &Term, context: &mut (impl Context + ?Sized)) -> Res
         TermKind::Normal(OriginalTerm::Phrase(phrase)) |
         TermKind::Exact(OriginalTerm::Phrase(phrase)), ..
         } => {
-            phrase_resolve(phrase, context)
+            context.phrase_docids(phrase).cloned()
         },
         Term{ term_kind: TermKind::Derivative(DerivativeTerm::Typo(words, ..) | DerivativeTerm::Synonym(words), ..) , .. } => {
             let mut result = RoaringBitmap::new();
@@ -119,66 +75,92 @@ pub fn resolve_docids(term: &Term, context: &mut (impl Context + ?Sized)) -> Res
         Term{ term_kind: TermKind::Derivative(DerivativeTerm::Split(words, .. ), ..), .. } => {
             let mut result = RoaringBitmap::new();
             for split in words{
-                result |= split_resolve(split,context)?;
+                result |= context.split_docids(split)?;
             }
 
             Ok(result)
         },
-        _ => todo!(),
+        Term{ term_kind: TermKind::Derivative(DerivativeTerm::SynonymPhrase(words, .. ), ..), .. } => {
+            let mut result = RoaringBitmap::new();
+            for phrase in words{
+                result |= context.phrase_docids(phrase)?;
+            }
+
+            Ok(result)
+        },
+        Term { term_kind: TermKind::Derivative(DerivativeTerm::PrefixTypo(prefixes, _), _), .. } => {
+            let mut result = RoaringBitmap::new();
+            for prefix in prefixes{
+                result |= context.prefix_docids(prefix)?;
+            }
+
+            Ok(result)
+        }
     }
 }
 
+pub fn resolve_fid_docids(term: &Term, context: &mut (impl Context + ?Sized), fid: Fid) -> Result<RoaringBitmap>{
+    match term {
+        Term{ term_kind:
+        TermKind::Normal(OriginalTerm::Word(word)) |
+        TermKind::Exact(OriginalTerm::Word(word)) |
+        TermKind::Derivative(DerivativeTerm::Ngram(word, ..), ..), ..
+        } => {
+            context.word_fid_docids(word, fid)
+        },
+        Term{ term_kind:
+        TermKind::Normal(OriginalTerm::Prefix(prefix)) |
+        TermKind::Exact(OriginalTerm::Prefix(prefix)), ..
+        } => {
+            context.prefix_fid_docids(prefix, fid)
+        },
+        Term{ term_kind:
+        TermKind::Normal(OriginalTerm::Phrase(phrase)) |
+        TermKind::Exact(OriginalTerm::Phrase(phrase)), ..
+        } => {
+            let Some(word) = phrase.first() else { return Ok(RoaringBitmap::new()) };
+            let mut word_fid_docids = context.word_fid_docids(word, fid)?;
+            word_fid_docids &= context.phrase_docids(phrase)?;
 
-// pub fn resolve_start_positions(term: &Term, context: &impl Context) -> Result<Vec<((Fid,Position), RoaringBitmap)>>{
-//     match &term {
-//
-//         Term{ term_kind:
-//         TermKind::Normal(OriginalTerm::Word(word)) |
-//         TermKind::Exact(OriginalTerm::Word(word)) |
-//         TermKind::Derivative(DerivativeTerm::Ngram(word, ..), ..), ..
-//         } => {
-//             context.word_position_docids(word)
-//         },
-//         Term{ term_kind:
-//         TermKind::Normal(OriginalTerm::Prefix(prefix)) |
-//         TermKind::Exact(OriginalTerm::Prefix(prefix)), ..
-//         } => {
-//             context.prefix_position_docids(prefix)
-//         },
-//         Term{ term_kind:
-//         TermKind::Normal(OriginalTerm::Phrase(phrase)) |
-//         TermKind::Exact(OriginalTerm::Phrase(phrase)), ..
-//         } => {
-//             let mut positions = phrase_position_resolve(phrase, context)?;
-//             for (position,_) in &mut positions{
-//                 position.1 -= phrase.len() as u32 - 1;
-//             }
-//             Ok(positions)
-//         },
-//         Term{ term_kind: TermKind::Derivative(DerivativeTerm::Typo(words, ..) | DerivativeTerm::Synonym(words), ..) , .. } => {
-//             let mut result = Vec::new();
-//             for word in words{
-//                 result.extend(context.word_position_docids(word)?);
-//             }
-//
-//             Ok(result)
-//         },
-//         Term{ term_kind: TermKind::Derivative(DerivativeTerm::Split(words, .. ), ..), .. } => {
-//             let mut result = Vec::new();
-//             for word in words{
-//                 let mut positions = split_position_resolve(word, context)?;
-//                 for (position,_) in &mut positions{
-//                     position.1 -= 1;
-//                 }
-//                 result.extend(positions);
-//             }
-//
-//             Ok(result)
-//         },
-//         _ => todo!(),
-//     }
-// }
+            Ok(word_fid_docids)
+        },
+        Term{ term_kind: TermKind::Derivative(DerivativeTerm::Typo(words, ..) | DerivativeTerm::Synonym(words), ..) , .. } => {
+            let mut result = RoaringBitmap::new();
+            for word in words{
+                result |= context.word_fid_docids(word, fid)?;
+            }
 
+            Ok(result)
+        },
+        Term{ term_kind: TermKind::Derivative(DerivativeTerm::Split(words, .. ), ..), .. } => {
+            let mut result = RoaringBitmap::new();
+            for split in words{
+                let word_fid_docids = context.word_fid_docids(&split.0, fid)?;
+                result |= word_fid_docids & context.split_docids(split)?;
+            }
+
+            Ok(result)
+        },
+        Term{ term_kind: TermKind::Derivative(DerivativeTerm::SynonymPhrase(words, .. ), ..), .. } => {
+            let mut result = RoaringBitmap::new();
+            for phrase in words{
+                let Some(word) = phrase.first() else { return Ok(RoaringBitmap::new()) };
+                let word_fid_docids = context.word_fid_docids(word, fid)?;
+                result |= word_fid_docids & context.phrase_docids(phrase)?;
+            }
+
+            Ok(result)
+        },
+        Term { term_kind: TermKind::Derivative(DerivativeTerm::PrefixTypo(prefixes, _), _), .. } => {
+            let mut result = RoaringBitmap::new();
+            for prefix in prefixes{
+                result |= context.prefix_fid_docids(prefix, fid)?;
+            }
+
+            Ok(result)
+        }
+    }
+}
 
 
 pub fn phrase_resolve(phrase: &[String], context: &mut (impl Context + ?Sized)) -> Result<RoaringBitmap>{

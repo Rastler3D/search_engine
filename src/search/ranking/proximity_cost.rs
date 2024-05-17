@@ -19,10 +19,9 @@ pub fn paths_cost(
     search_context: &mut impl Context,
 ) -> Result<VecMap<VecMap<[BitSet; MAX_DISTANCE as usize]>>> {
     let mut visited = VecMap::with_capacity(graph.nodes.len());
-    println!("{:?}", graph);
     let time = Instant::now();
     let res = graph_traverse(graph.root, graph, search_context, &mut visited)?;
-    println!("{:?}", time.elapsed());
+
     Ok(visited)
 }
 
@@ -34,12 +33,7 @@ fn graph_traverse<'search, 'cost, 'visited>(
     mut visited: &'visited mut VecMap<VecMap<[BitSet; MAX_DISTANCE as usize]>>,
 ) -> Result<&'visited VecMap<[BitSet; MAX_DISTANCE as usize]>> {
     let node = &graph.nodes[node_id];
-    // for successor_id in node.successors.iter() {
-    //     if !cost.contains_key(&(node_id, successor_id)) {
-    //         let successor = &graph.nodes[successor_id];
-    //         cost.insert((node_id, successor_id), proximity_cost(node, successor, search_context)?);
-    //     }
-    // }
+
 
     let time = Instant::now();
     match &node.data {
@@ -81,82 +75,8 @@ fn graph_traverse<'search, 'cost, 'visited>(
     Ok(paths)
 }
 
-// pub fn proximity_cost(
-//     from: &GraphNode,
-//     to: &GraphNode,
-//     context: &mut impl Context,
-// ) -> Result<VecMap<RoaringBitmap>> {
-//     let result = match &from.data {
-//         NodeData::Start | NodeData::End => {
-//             match &to.data {
-//                 NodeData::Start | NodeData::End => {
-//                     let mut vec_map = VecMap::new();
-//                     vec_map.insert(0, context.all_docids()?);
-//                     vec_map
-//                 }
-//                 NodeData::Term(term) => {
-//                     let docids = resolve_docids(term, context)?;
-//                     let mut vec_map = VecMap::new();
-//                     vec_map.insert(0, docids);
-//                     vec_map
-//                 }
-//             }
-//         }
-//         NodeData::Term(term) => {
-//             match &to.data {
-//                 NodeData::Start | NodeData::End => {
-//                     let docids = resolve_docids(term, context)?;
-//                     let mut vec_map = VecMap::new();
-//                     vec_map.insert(0, docids);
-//                     vec_map
-//                 }
-//                 NodeData::Term(to_term) => {
-//
-//                     let from_positions = resolve_positions(term, context)?;
-//
-//                     let to_positions = resolve_start_positions(to_term, context)?;
-//
-//                     let mut vec_map = VecMap::new();
-//                     let time = Instant::now();
-//                     for (from, from_docids) in &from_positions{
-//                         for (to, to_docids) in &to_positions{
-//                             let cost = if from.0 == to.0{
-//                                 proximity_from_distance((from.1 + 1).abs_diff(to.1))
-//                             } else {
-//                                 10
-//                             };
-//                             let bitset = vec_map.get_or_insert_with(cost as usize, || RoaringBitmap::new());
-//                             let time = Instant::now();
-//                             *bitset |= to_docids & from_docids;
-//                         }
-//                     }
-//                     println!("FULL COST {:?}", time.elapsed());
-//                     vec_map
-//
-//                 }
-//             }
-//         }
-//     };
-//
-//     Ok(result)
-// }
 
-#[inline(always)]
-fn proximity_from_distance(distance: u16) -> u8{
-    match distance {
-        0..1 => 0,
-        1..2 => 1,
-        2..3 => 2,
-        3..5 => 3,
-        5..8 => 4,
-        8..20 => 5,
-        20..50 => 6,
-        50..150 => 7,
-        150..1000 => 8,
-        1000..10000 => 9,
-        10000.. => 10
-    }
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -164,7 +84,6 @@ mod tests {
     use crate::search::query_graph::tests::TestContext;
     use crate::search::query_parser::parse_query;
     use crate::search::query_parser::tests::build_analyzer;
-    use crate::search::ranking::paths_cost::TypoCost;
     use analyzer::analyzer::Analyzer;
     use std::time::Instant;
 

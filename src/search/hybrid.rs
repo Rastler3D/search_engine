@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use itertools::Itertools;
 use roaring::RoaringBitmap;
 
-use crate::score_details::{ScoreDetails, ScoreValue, ScoringStrategy};
+use crate::score_details::{ScoreDetails, ScoreValue};
 use crate::search::SemanticSearch;
 use crate::{MatchingWords, Result, Search, SearchResult};
 
@@ -11,8 +11,7 @@ struct ScoreWithRatioResult {
     matching_words: MatchingWords,
     candidates: RoaringBitmap,
     document_scores: Vec<(u32, ScoreWithRatio)>,
-    degraded: bool,
-    used_negative_operator: bool,
+    query_graph: Option<String>
 }
 
 type ScoreWithRatio = (Vec<ScoreDetails>, f32);
@@ -46,22 +45,11 @@ fn compare_scores(
                     order => return order,
                 }
             }
-            (Some(ScoreValue::GeoSort(left)), Some(ScoreValue::GeoSort(right))) => {
-                match left.partial_cmp(right).unwrap() {
-                    Ordering::Equal => continue,
-                    order => return order,
-                }
-            }
             (Some(ScoreValue::Score(x)), Some(_)) => {
                 return if x == 0. { Ordering::Less } else { Ordering::Greater }
             }
             (Some(_), Some(ScoreValue::Score(x))) => {
                 return if x == 0. { Ordering::Greater } else { Ordering::Less }
-            }
-            // if we have this, we're bad
-            (Some(ScoreValue::GeoSort(_)), Some(ScoreValue::Sort(_)))
-            | (Some(ScoreValue::Sort(_)), Some(ScoreValue::GeoSort(_))) => {
-                unreachable!("Unexpected geo and sort comparison")
             }
         }
     }
@@ -79,16 +67,15 @@ impl ScoreWithRatioResult {
             matching_words: results.matching_words,
             candidates: results.candidates,
             document_scores,
-            degraded: results.degraded,
-            used_negative_operator: results.used_negative_operator,
+            query_graph: results.query_graph
         }
     }
 
     fn merge(
         vector_results: Self,
         keyword_results: Self,
-        from: usize,
-        length: usize,
+        from: u64,
+        length: u64,
     ) -> (SearchResult, u32) {
         #[derive(Clone, Copy)]
         enum ResultSource {
@@ -122,9 +109,9 @@ impl ScoreWithRatioResult {
             // remove documents we already saw
             .filter(|((docid, _), _)| documents_seen.insert(*docid))
             // start skipping **after** the filter
-            .skip(from)
+            .skip(from as usize)
             // take **after** skipping
-            .take(length)
+            .take(length as usize)
         {
             if let ResultSource::Semantic = source {
                 semantic_hit_count += 1;
@@ -140,9 +127,7 @@ impl ScoreWithRatioResult {
                 candidates: vector_results.candidates | keyword_results.candidates,
                 documents_ids,
                 document_scores,
-                degraded: vector_results.degraded | keyword_results.degraded,
-                used_negative_operator: vector_results.used_negative_operator
-                    | keyword_results.used_negative_operator,
+                query_graph: keyword_results.query_graph.or(vector_results.query_graph),
             },
             semantic_hit_count,
         )
@@ -159,16 +144,13 @@ impl<'a> Search<'a> {
             offset: 0,
             limit: self.limit + self.offset,
             sort_criteria: self.sort_criteria.clone(),
+            analyzer: self.analyzer.clone(),
             searchable_attributes: self.searchable_attributes,
-            geo_strategy: self.geo_strategy,
             terms_matching_strategy: self.terms_matching_strategy,
-            scoring_strategy: ScoringStrategy::Detailed,
-            words_limit: self.words_limit,
-            exhaustive_number_hits: self.exhaustive_number_hits,
+            output_query_graph: self.output_query_graph,
             rtxn: self.rtxn,
             index: self.index,
             semantic: self.semantic.clone(),
-            time_budget: self.time_budget.clone(),
         };
 
         let semantic = search.semantic.take();
@@ -213,7 +195,7 @@ impl<'a> Search<'a> {
 
         let (merge_results, semantic_hit_count) =
             ScoreWithRatioResult::merge(vector_results, keyword_results, self.offset, self.limit);
-        assert!(merge_results.documents_ids.len() <= self.limit);
+        assert!((merge_results.documents_ids.len() as u64) <= self.limit);
         Ok((merge_results, Some(semantic_hit_count)))
     }
 
@@ -222,7 +204,7 @@ impl<'a> Search<'a> {
         const GOOD_ENOUGH_SCORE: f64 = 0.45;
 
         // 1. we check that we got a sufficient number of results
-        if keyword_results.document_scores.len() < self.limit + self.offset {
+        if (keyword_results.document_scores.len() as u64) < self.limit + self.offset {
             return false;
         }
 

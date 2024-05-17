@@ -1,9 +1,13 @@
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::ops::ControlFlow;
+use std::time::Instant;
+use roaring::MultiOps;
 use crate::proximity::MAX_DISTANCE;
 use crate::search::query_graph::{NodeData, QueryGraph};
 use crate::Result;
 use crate::search::query_parser::{Term, TermKind};
+use crate::search::ranking::proximity::ProximityCost;
 use crate::search::utils::bit_set::BitSet;
 use crate::search::utils::vec_map::VecMap;
 
@@ -16,9 +20,9 @@ pub struct Edge {
 
 pub type Depth = usize;
 
-struct VisitorContext<'a> {
+struct VisitorContext<'a, T: AsRef<[BitSet]>> {
     graph: &'a QueryGraph,
-    all_costs_from_node: VecMap<VecMap<[BitSet; MAX_DISTANCE as usize]>>,
+    all_costs_from_node: VecMap<VecMap<T>>,
     allowed_paths: Option<HashSet<BitSet>>,
 }
 
@@ -27,27 +31,31 @@ struct VisitorState<'a> {
     path: &'a mut Vec<Edge>,
     visited_nodes: BitSet,
     allowed_paths: Option<&'a mut Vec<BitSet>>,
-    allowed_paths_bitset: BitSet,
+    allowed_paths_bitset: &'a mut BitSet<Vec<u64>>,
     restricted_paths: &'a mut Vec<usize>
 }
 
-pub struct PathVisitor<'a> {
-    ctx: VisitorContext<'a>,
+pub struct PathVisitor<'a, EC: EdgeToCost = ProximityCost, T: AsRef<[BitSet]> = [BitSet; MAX_DISTANCE as usize]> {
+    ctx: VisitorContext<'a, T>,
     allowed_paths_buffer: Vec<BitSet>,
+    allowed_paths_bitset_buffer: BitSet<Vec<u64>>,
     path_buffer: Vec<Edge>,
-    restricted_paths_buffer: Vec<usize>
+    restricted_paths_buffer: Vec<usize>,
+    _phantom: PhantomData<EC>
 }
-impl<'a> PathVisitor<'a> {
+impl<'a, EC: EdgeToCost, T: AsRef<[BitSet]>> PathVisitor<'a, EC, T> {
     pub fn new(
         graph: &'a QueryGraph,
-        all_costs_from_node: VecMap<VecMap<[BitSet; MAX_DISTANCE as usize]>>,
+        all_costs_from_node: VecMap<VecMap<T>>,
         allowed_paths: Option<HashSet<BitSet>>
     ) -> Self {
         Self{
             ctx: VisitorContext { graph, all_costs_from_node, allowed_paths },
             allowed_paths_buffer: Vec::new(),
+            allowed_paths_bitset_buffer: BitSet::new_vec(),
             path_buffer: Vec::new(),
             restricted_paths_buffer: Vec::new(),
+            _phantom: Default::default(),
         }
     }
 
@@ -63,7 +71,8 @@ impl<'a> PathVisitor<'a> {
         self.path_buffer.clear();
         self.restricted_paths_buffer.clear();
         self.allowed_paths_buffer.clear();
-
+        self.allowed_paths_bitset_buffer.clear();
+        self.allowed_paths_bitset_buffer.extend(0..self.ctx.allowed_paths.as_ref().map_or(0,|paths| paths.len()));
         let mut state = VisitorState {
             remaining_cost: cost,
             path: &mut self.path_buffer,
@@ -71,28 +80,31 @@ impl<'a> PathVisitor<'a> {
                 self.allowed_paths_buffer.extend(paths);
                 &mut self.allowed_paths_buffer
             }),
-            allowed_paths_bitset: BitSet::<[_;2]>::init(true, self.ctx.allowed_paths.as_ref().map_or(0,|paths| paths.len())),
+            allowed_paths_bitset: &mut self.allowed_paths_bitset_buffer,
             restricted_paths: &mut self.restricted_paths_buffer,
             visited_nodes: BitSet::new(),
         };
-        let _ = state.visit_node(self.ctx.graph.root, &mut visit, &mut self.ctx)?;
+        let _ = state.visit_node::<EC>(self.ctx.graph.root, &mut visit, &mut self.ctx)?;
 
         Ok(())
     }
 }
 
+pub trait EdgeToCost{
+    fn to_cost(edge: usize, node_id: usize, graph: &QueryGraph) -> usize;
+}
+
 impl<'a> VisitorState<'a> {
-    fn visit_node(
+    fn visit_node<EC: EdgeToCost>(
         &mut self,
         from_node: usize,
         visit: &mut impl (FnMut(&[Edge]) -> Result<ControlFlow<()>>),
-        ctx: &mut VisitorContext,
+        ctx: &VisitorContext<impl AsRef<[BitSet]>>,
     ) -> Result<ControlFlow<(), bool>> {
         if from_node == ctx.graph.end {
             if let Some(allowed_paths) = &self.allowed_paths{
                 for path in self.allowed_paths_bitset.iter(){
                     let mut path = allowed_paths[path];
-                    //let mut path = *path;
                     let path = path.difference(&self.visited_nodes);
                     let is_allowed = if path.len() > 1 {
                         false
@@ -129,8 +141,10 @@ impl<'a> VisitorState<'a> {
                     self.restricted_paths.push(path_idx);
                 }
             }
-            let restricted = BitSet::from_iter(self.restricted_paths[restricted_paths_len..].iter().copied());
-            self.allowed_paths_bitset.difference(&restricted);
+            let _ = self.restricted_paths[restricted_paths_len..].iter().map(|&x| {
+                self.allowed_paths_bitset.remove(x);
+            });
+
 
         }
 
@@ -142,33 +156,36 @@ impl<'a> VisitorState<'a> {
                 from_node
             };
             let costs = &ctx.all_costs_from_node[node];
-            if let Some(&paths) = costs.get(self.remaining_cost) {
-                for (cost, next_nodes) in paths.iter().enumerate() {
-                    if self.remaining_cost < cost{
-                        continue
-                    }
-                    self.remaining_cost -= cost;
+            if let Some(paths) = costs.get(self.remaining_cost) {
+                for (edge, next_nodes) in paths.as_ref().iter().enumerate() {
                     for to_node in next_nodes.iter() {
+                        let cost = EC::to_cost(edge, to_node, ctx.graph);
+                        if self.remaining_cost < cost{
+                            continue
+                        }
+                        self.remaining_cost -= cost;
+
                         self.path.push(Edge {
                             from: from_node,
                             to: to_node,
-                            cost
+                            cost: edge
                         });
-                        let cf = self.visit_node(to_node, visit, ctx)?;
+                        let cf = self.visit_node::<EC>(to_node, visit, ctx)?;
                         self.path.pop();
 
                         let ControlFlow::Continue(next_any_valid) = cf else {
                             return Ok(ControlFlow::Break(()));
                         };
                         any_valid |= next_any_valid;
+
+                        self.remaining_cost += cost;
                     }
-                    self.remaining_cost += cost;
                 }
             }
             self.visited_nodes.remove(from_node);
         }
 
-        if let Some(allowed_paths) = &mut self.allowed_paths {
+        if let Some(_) = &mut self.allowed_paths {
             self.allowed_paths_bitset.extend(self.restricted_paths.drain(restricted_paths_len..));
         }
 
@@ -205,12 +222,12 @@ mod tests {
         let mut costs = paths_cost(&query_graph, &mut context).unwrap();
         let elapsed = time.elapsed();
         println!("Graph cost {:?}", elapsed);
+        let mut path: PathVisitor = PathVisitor::new(&mut query_graph, costs, Some(HashSet::from([BitSet::from_iter([0,1,2,3]),BitSet::from_iter([0,1,7,3]),BitSet::from_iter([0,5,2,3]),BitSet::from_iter([0,6,7,3])])));
+        path.visit_paths(5, |x| { Ok(ControlFlow::Continue(())) }).unwrap();
         let time = Instant::now();
-        let mut path = PathVisitor::new(&mut query_graph, costs, Some(HashSet::from([BitSet::from_iter([0,1,2,3]),BitSet::from_iter([0,1,7,3]),BitSet::from_iter([0,5,2,3]),BitSet::from_iter([0,6,7,3])])));
-
-        path.visit_paths(3, |x| { println!("{x:?}"); Ok(ControlFlow::Continue(())) }).unwrap();
+        path.visit_paths(3, |x| { Ok(ControlFlow::Continue(())) }).unwrap();
         let elapsed = time.elapsed();
-        println!("Graph cost {:?}", elapsed);
+        println!("Graph visit {:?}", elapsed);
 
     }
 }

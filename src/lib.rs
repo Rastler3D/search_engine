@@ -9,6 +9,8 @@
 #![cfg_attr(all(test, fuzzing), feature(no_coverage))]
 #![allow(clippy::type_complexity)]
 #![feature(trait_alias)]
+#![feature(type_alias_impl_trait)]
+#![feature(anonymous_lifetime_in_impl_trait)]
 
 #[cfg(test)]
 #[global_allocator]
@@ -61,11 +63,12 @@ pub use self::heed_codec::{
     UncheckedU8StrStrCodec,
 };
 pub use self::index::Index;
-//pub use self::search::facet::{FacetValueHit, SearchForFacetValues};
+pub use self::search::facet::{OrderBy, FacetValueHit, SearchForFacetValues, DEFAULT_VALUES_PER_FACET};
+pub use self::search::matches::{FormatOptions, MatchBounds, MatcherBuilder, MatchingWords };
 pub use self::search::{
-     Filter,
-    Search, SearchResult, SemanticSearch, TermsMatchingStrategy,
+    Filter, Search, SearchResult, SemanticSearch, TermsMatchingStrategy,
 };
+pub use self::update::thread_pool_no_abort::{ThreadPoolNoAbortBuilder, ThreadPoolNoAbort};
 
 pub type Result<T> = std::result::Result<T, error::Error>;
 

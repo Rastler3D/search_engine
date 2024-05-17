@@ -1,3 +1,4 @@
+use std::cmp::max;
 use crate::search::context::{Context, Fid};
 use crate::search::query_graph::{GraphNode, NodeData, QueryGraph};
 use crate::search::query_parser::{Term, TermKind};
@@ -9,51 +10,58 @@ use itertools::Itertools;
 use polonius_the_crab::{polonius, polonius_return};
 use roaring::RoaringBitmap;
 use std::iter::empty;
+use std::ops::RangeInclusive;
 use std::time::Instant;
-use crate::Result;
+use smallvec::{SmallVec, smallvec};
+use crate::proximity::MAX_DISTANCE;
+use crate::{FieldId, Result};
+
+pub const MAX_ATTRIBUTE: usize = 8;
 
 pub fn paths_cost(
     graph: &QueryGraph,
-    search_context: &impl Context,
-) -> Result<VecMap<Vec<(BitSet, RoaringBitmap)>>> {
-    let mut cost = VecMap::with_capacity(graph.nodes.len());
+    context: &mut impl Context,
+) -> Result<VecMap<VecMap<SmallVec<[BitSet; MAX_ATTRIBUTE]>>>> {
     let mut visited = VecMap::with_capacity(graph.nodes.len());
-    println!("{:?}", graph);
     let time = Instant::now();
-    let res = graph_traverse(graph.root, graph, search_context, &mut cost, &mut visited).cloned();
+    let max_cost: usize = {
+        if let Some(attributes) = context
+            .searchable_fields_ids()?
+            .map(|x| x.len())
+        {
+            attributes.saturating_sub(1)
+        } else {
+            context.field_ids()?.ids().max().unwrap_or_default() as usize
+        }
+    };
+
+    let res = graph_traverse(graph.root, graph, context, max_cost, &mut visited)?;
+
+
     println!("{:?}", time.elapsed());
-    res
+    Ok(visited)
 }
 
 fn graph_traverse<'search, 'cost, 'visited>(
     node_id: usize,
     graph: &QueryGraph,
-    search_context: &'search impl Context,
-    mut cost: &'cost mut VecMap<VecMap<RoaringBitmap>>,
-    mut visited: &'visited mut VecMap<VecMap<Vec<(BitSet, RoaringBitmap)>>>,
-) -> Result<&'visited VecMap<Vec<(BitSet, RoaringBitmap)>>> {
-
+    search_context: &'search mut impl Context,
+    max_cost: usize,
+    mut visited: &'visited mut VecMap<VecMap<SmallVec<[BitSet; MAX_ATTRIBUTE]>>>,
+) -> Result<&'visited VecMap<SmallVec<[BitSet; MAX_ATTRIBUTE]>>> {
     let node = &graph.nodes[node_id];
-    if !cost.contains_key(node_id) {
-        cost.insert(node_id, attribute_cost(node, search_context)?);
-    }
+
     let time = Instant::now();
     match &node.data {
         NodeData::Term(Term {
-            term_kind: TermKind::Derivative(_, original_term_node),
-            ..
+            term_kind: TermKind::Derivative(_, original_term_node), ..
         }) => {
-            let result = graph_traverse(*original_term_node, graph, search_context, cost, visited);
+            let result = graph_traverse(*original_term_node, graph, search_context, max_cost, visited);
             return result;
-        }
-        NodeData::End if !visited.contains_key(node_id) =>{
-            let mut vec_map = VecMap::new();
-            vec_map.insert(0, vec![(BitSet::new(), search_context.all_docids()?)]);
-            return Ok(visited.get_or_insert(node_id, vec_map))
         }
         _ => {
             polonius!(
-                |visited| -> Result<&'polonius VecMap<Vec<(BitSet, RoaringBitmap)>>> {
+                |visited| -> Result<&'polonius VecMap<SmallVec<[BitSet; MAX_ATTRIBUTE]>>> {
                     if let Some(paths) = visited.get(node_id) {
                         polonius_return!(Ok(paths));
                     }
@@ -62,26 +70,21 @@ fn graph_traverse<'search, 'cost, 'visited>(
         }
     }
 
-    let mut paths = VecMap::new();
+    let mut paths: VecMap<SmallVec<[BitSet; MAX_ATTRIBUTE]>> = VecMap::new();
     for successor_id in node.successors.iter() {
-        let prev_paths = graph_traverse(successor_id, graph, search_context, cost, visited)?;
-        let cost = &cost[successor_id];
-        for (paths_cost, paths_docids) in prev_paths.key_value() {
-
-            for (cost, docids) in cost.key_value() {
+        if successor_id == graph.end{
+            paths
+                .get_or_insert_with(0, || smallvec![BitSet::new(); max_cost + 1])[0]
+                .insert(successor_id);
+            continue
+        }
+        let prev_paths = graph_traverse(successor_id, graph, search_context, max_cost, visited)?;
+        for (path_cost, _) in prev_paths.key_value() {
+            for attribute in 0..=max_cost{
+                let edge_cost = cost(successor_id, graph, attribute);
                 paths
-                    .get_or_insert_with(paths_cost + cost, || Vec::new())
-                    .extend(paths_docids.iter().filter_map(|(x, y)| {
-                        let mut x = *x;
-                        x.insert(successor_id);
-                        let docids = y & docids;
-                        if docids.is_empty(){
-                            None
-                        } else {
-                            Some((x, docids))
-                        }
-
-                    }))
+                    .get_or_insert_with(path_cost + edge_cost, || smallvec![BitSet::new(); max_cost + 1])[attribute]
+                    .insert(successor_id);
             }
         }
     }
@@ -89,25 +92,12 @@ fn graph_traverse<'search, 'cost, 'visited>(
     Ok(paths)
 }
 
-pub fn attribute_cost(
-    node: &GraphNode,
-    context: &impl Context,
-) -> Result<VecMap<RoaringBitmap>> {
-    match &node.data {
-        NodeData::Start | NodeData::End => {
-            let mut vec_map = VecMap::new();
-            vec_map.insert(0, context.all_docids()?);
-            Ok(vec_map)
-        }
-        NodeData::Term(term) => {
-            let mut vec_map = VecMap::new();
-            let positions = resolve_positions(term, context)?;
-            for ((fid, _), bitmap) in positions {
-                let docids = vec_map.get_or_insert_with(fid as usize, || RoaringBitmap::new());
-                *docids |= bitmap;
-            }
-            Ok(vec_map)
-        }
+pub fn cost(node_id: usize, graph: &QueryGraph, attribute: usize) -> usize{
+
+    match &graph.nodes[node_id].data {
+        NodeData::Start | NodeData::End => 0,
+        NodeData::Term(term) => term.position.clone().count() * attribute
+
     }
 }
 
@@ -117,7 +107,6 @@ mod tests {
     use crate::search::query_graph::tests::TestContext;
     use crate::search::query_parser::parse_query;
     use crate::search::query_parser::tests::build_analyzer;
-    use crate::search::ranking::paths_cost::TypoCost;
     use analyzer::analyzer::Analyzer;
     use std::time::Instant;
 

@@ -9,6 +9,8 @@ use crate::heed_codec::facet::{
 };
 use crate::heed_codec::BytesRefCodec;
 
+
+pub type DescendingSortIter<'a> = impl Iterator<Item = Result<(RoaringBitmap, &'a [u8])>> + 'a;
 /// See documentationg for [`ascending_facet_sort`](super::ascending_facet_sort).
 ///
 /// This function does the same thing, but in the opposite order.
@@ -17,7 +19,7 @@ pub fn descending_facet_sort<'t>(
     db: heed::Database<FacetGroupKeyCodec<BytesRefCodec>, FacetGroupValueCodec>,
     field_id: u16,
     candidates: RoaringBitmap,
-) -> Result<impl Iterator<Item = Result<(RoaringBitmap, &'t [u8])>> + 't> {
+) -> Result<DescendingSortIter<'t>> {
     let highest_level = get_highest_level(rtxn, db, field_id)?;
     if let Some(first_bound) = get_first_facet_value::<BytesRefCodec>(rtxn, db, field_id)? {
         let first_key = FacetGroupKey { field_id, level: highest_level, left_bound: first_bound };

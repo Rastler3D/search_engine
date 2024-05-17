@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::{Debug, Display};
 use std::ops::Bound::{self, Excluded, Included};
@@ -81,22 +82,98 @@ impl From<Filter> for Predicate{
 }
 
 impl Filter {
-    pub fn from_json(filter: &serde_json::Value) -> Result<Option<Self>> {
-        match filter {
-            serde_json::Value::Object(_) => {
-                let condition = Filter::from_str(&filter.to_string())?;
+    pub fn from_json(facets: &serde_json::Value) -> Result<Option<Self>> {
+        match facets {
+            object@ serde_json::Value::Object(_) => {
+                let condition = Filter::from_str(&object.to_string())?;
+                Ok(condition)
+            },
+            serde_json::Value::String(expr) => {
+                let condition = Filter::from_str(expr)?;
                 Ok(condition)
             }
+            serde_json::Value::Array(arr) => Self::parse_filter_array(arr),
             v => Err(Error::UserError(UserError::InvalidFilterExpression(
-                &["String"],
+                &["String", "Object", "[String | Object]"],
                 v.clone(),
             ))),
         }
     }
 
+    fn parse_filter_array(arr: &[serde_json::Value]) -> Result<Option<Self>> {
+        let mut ands = Vec::new();
+        for value in arr {
+            match value {
+                object@ serde_json::Value::Object(_) => ands.push(Either::Right(object.to_string().into())),
+                serde_json::Value::String(s) => ands.push(Either::Right(s.as_str().into())),
+                serde_json::Value::Array(arr) => {
+                    let mut ors = Vec::new();
+                    for value in arr {
+                        match value {
+                            object@ serde_json::Value::Object(s) => ors.push(object.to_string().into()),
+                            serde_json::Value::String(s) => ors.push(s.as_str().into()),
+                            v => {
+                                return Err(Error::UserError(UserError::InvalidFilterExpression(
+                                    &["String", "Object"],
+                                    v.clone(),
+                                )))
+                            }
+                        }
+                    }
+                    ands.push(Either::Left(ors));
+                }
+                v => {
+                    return Err(Error::UserError(UserError::InvalidFilterExpression(
+                        &["String", "Object", "[String | Object]"],
+                        v.clone(),
+                    )))
+                }
+            }
+        }
 
+        Filter::from_array(ands)
+    }
+    pub fn from_array<'a, I, J>(array: I) -> Result<Option<Self>>
+        where
+            I: IntoIterator<Item = Either<J, Cow<'a, str>>>,
+            J: IntoIterator<Item = Cow<'a, str>>,
+    {
+        let mut ands = vec![];
 
-    #[allow(clippy::should_implement_trait)]
+        for either in array {
+            match either {
+                Either::Left(array) => {
+                    let mut ors = vec![];
+                    for rule in array {
+                        if let Some(filter) = Self::from_str(rule.as_ref())? {
+                            ors.push(filter.condition);
+                        }
+                    }
+
+                    match ors.len() {
+                        0 => (),
+                        1 => ands.push(ors.pop().unwrap()),
+                        _ => ands.push(Predicate::Operators(vec![Operator::Or(OrOperator(ors))])),
+                    }
+                }
+                Either::Right(rule) => {
+                    if let Some(filter) = Self::from_str(rule.as_ref())? {
+                        ands.push(filter.condition);
+                    }
+                }
+            }
+        }
+        let and = if ands.is_empty() {
+            return Ok(None);
+        } else if ands.len() == 1 {
+            ands.pop().unwrap()
+        } else {
+            Predicate::Operators(vec![Operator::And(AndOperator(ands))])
+        };
+
+        Ok(Some(Self { condition: and }))
+    }
+
     pub fn from_str(expression: &str) -> Result<Option<Self>> {
         let condition = match Predicate::from_str(expression) {
             Ok(predicate) => Ok(predicate),

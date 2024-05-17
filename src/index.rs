@@ -9,6 +9,8 @@ use heed::{CompactionOption, Database, RoTxn, RwTxn, Unspecified};
 use roaring::RoaringBitmap;
 use rstar::RTree;
 use time::OffsetDateTime;
+use tracing::info;
+use analyzer::analyzer::BoxAnalyzer;
 
 use crate::documents::PrimaryKey;
 use crate::error::{InternalError, UserError};
@@ -38,7 +40,6 @@ pub const DEFAULT_MIN_WORD_LEN_TWO_TYPOS: u8 = 9;
 
 pub mod main_key {
     pub const CRITERIA_KEY: &str = "criteria";
-    pub const DISTINCT_FIELD_KEY: &str = "distinct-field-key";
     pub const DOCUMENTS_IDS_KEY: &str = "documents-ids";
     pub const HIDDEN_FACETED_FIELDS_KEY: &str = "hidden-faceted-fields";
     pub const FILTERABLE_FIELDS_KEY: &str = "filterable-fields";
@@ -64,7 +65,6 @@ pub mod main_key {
     pub const PROXIMITY_PRECISION: &str = "proximity-precision";
     pub const EMBEDDING_CONFIGS: &str = "embedding_configs";
     pub const ANALYZER_CONFIGS: &str = "analyzer_configs";
-    pub const SEARCH_CUTOFF: &str = "search_cutoff";
 }
 
 pub mod db_name {
@@ -656,7 +656,6 @@ impl Index {
     pub fn user_defined_faceted_fields(&self, rtxn: &RoTxn) -> Result<HashSet<String>> {
         let filterable_fields = self.filterable_fields(rtxn)?;
         let sortable_fields = self.sortable_fields(rtxn)?;
-        let distinct_field = self.distinct_field(rtxn)?;
         let asc_desc_fields =
             self.criteria(rtxn)?.into_iter().filter_map(|criterion| match criterion {
                 Criterion::Asc(field) | Criterion::Desc(field) => Some(field),
@@ -666,9 +665,6 @@ impl Index {
         let mut faceted_fields = filterable_fields;
         faceted_fields.extend(sortable_fields);
         faceted_fields.extend(asc_desc_fields);
-        if let Some(field) = distinct_field {
-            faceted_fields.insert(field.to_owned());
-        }
 
         Ok(faceted_fields)
     }
@@ -724,24 +720,6 @@ impl Index {
             Some(docids) => Ok(docids),
             None => Ok(RoaringBitmap::new()),
         }
-    }
-
-    /* distinct field */
-
-    pub(crate) fn put_distinct_field(
-        &self,
-        wtxn: &mut RwTxn,
-        distinct_field: &str,
-    ) -> heed::Result<()> {
-        self.main.remap_types::<Str, Str>().put(wtxn, main_key::DISTINCT_FIELD_KEY, distinct_field)
-    }
-
-    pub fn distinct_field<'a>(&self, rtxn: &'a RoTxn) -> heed::Result<Option<&'a str>> {
-        self.main.remap_types::<Str, Str>().get(rtxn, main_key::DISTINCT_FIELD_KEY)
-    }
-
-    pub(crate) fn delete_distinct_field(&self, wtxn: &mut RwTxn) -> heed::Result<bool> {
-        self.main.remap_key_type::<Str>().delete(wtxn, main_key::DISTINCT_FIELD_KEY)
     }
 
     /* criteria */
@@ -1120,7 +1098,20 @@ impl Index {
         &self,
         rtxn: &RoTxn<'_>,
     ) -> Result<AnalyzerConfigs> {
-        self.analyzer_configs(rtxn).map(AnalyzerConfigs::new)
+        self.analyzer_configs(rtxn).map(|x| AnalyzerConfigs::new(x))
+    }
+    pub fn analyzer(
+        &self,
+        rtxn: &RoTxn<'_>,
+        analyzer: &Option<String>
+    ) -> Result<BoxAnalyzer> {
+        let analyzers = self.analyzers(rtxn)?;
+        info!("{analyzers:?}");
+        if let Some(analyzer_name) = analyzer{
+            analyzers.get(analyzer_name).ok_or_else(|| UserError::InvalidAnalyzer(analyzer_name.clone()).into())
+        } else {
+            analyzers.get_default().ok_or_else(|| UserError::NoDefaultAnalyzer.into())
+        }
     }
 
     pub fn analyzer_configs(
@@ -1131,7 +1122,7 @@ impl Index {
             .main
             .remap_types::<Str, SerdeJson<Vec<(String, AnalyzerConfig)>>>()
             .get(rtxn, main_key::ANALYZER_CONFIGS)?
-            .unwrap_or_default())
+            .unwrap_or(vec![("default".to_string(), AnalyzerConfig::default())]))
     }
 
     pub(crate) fn put_analyzer_configs(
@@ -1148,18 +1139,6 @@ impl Index {
 
     pub(crate) fn delete_analyzer_configs(&self, wtxn: &mut RwTxn<'_>) -> heed::Result<bool> {
         self.main.remap_key_type::<Str>().delete(wtxn, main_key::ANALYZER_CONFIGS)
-    }
-
-    pub(crate) fn put_search_cutoff(&self, wtxn: &mut RwTxn<'_>, cutoff: u64) -> heed::Result<()> {
-        self.main.remap_types::<Str, BEU64>().put(wtxn, main_key::SEARCH_CUTOFF, &cutoff)
-    }
-
-    pub fn search_cutoff(&self, rtxn: &RoTxn<'_>) -> Result<Option<u64>> {
-        Ok(self.main.remap_types::<Str, BEU64>().get(rtxn, main_key::SEARCH_CUTOFF)?)
-    }
-
-    pub(crate) fn delete_search_cutoff(&self, wtxn: &mut RwTxn<'_>) -> heed::Result<bool> {
-        self.main.remap_key_type::<Str>().delete(wtxn, main_key::SEARCH_CUTOFF)
     }
 }
 
@@ -1506,12 +1485,6 @@ pub(crate) mod tests {
             .unwrap();
 
 
-
-        index
-            .update_settings(|settings| {
-                settings.set_distinct_field("id".to_owned());
-            })
-            .unwrap();
 
 
     }

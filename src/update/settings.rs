@@ -24,8 +24,8 @@ use crate::vector::settings::{check_set, check_unset, EmbedderSource, EmbeddingS
 use crate::vector::{Embedder, EmbeddingConfig, EmbeddingConfigs};
 use crate::{FieldsIdsMap, Index, Result};
 use crate::update::analyzer_settings::{AnalyzerConfig, AnalyzerSettings, default_analyzer};
-use crate::update::split_config::{SplitJoinConfig, SplitJoinSetting};
-use crate::update::typo_config::{TypoConfig, TypoSetting};
+use crate::update::split_config::{SplitJoinConfig, SplitJoinSettings};
+use crate::update::typo_config::{TypoConfig, TypoSettings};
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub enum Setting<T> {
@@ -137,25 +137,21 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Setting<T> {
 pub struct Settings<'a, 't, 'i> {
     wtxn: &'t mut heed::RwTxn<'i>,
     index: &'i Index,
-
     indexer_config: &'a IndexerConfig,
-
     searchable_fields: Setting<Vec<String>>,
     filterable_fields: Setting<HashSet<String>>,
     sortable_fields: Setting<HashSet<String>>,
     criteria: Setting<Vec<Criterion>>,
-    distinct_field: Setting<String>,
     synonyms: Setting<BTreeMap<String, Vec<String>>>,
     primary_key: Setting<String>,
-    typo_config: Setting<TypoSetting>,
-    split_join_config: Setting<SplitJoinSetting>,
+    typo_config: Setting<TypoSettings>,
+    split_join_config: Setting<SplitJoinSettings>,
     max_values_per_facet: Setting<usize>,
     sort_facet_values_by: Setting<OrderByMap>,
     pagination_max_total_hits: Setting<usize>,
     proximity_precision: Setting<ProximityPrecision>,
     embedder_settings: Setting<BTreeMap<String, Setting<EmbeddingSettings>>>,
     analyzer_settings: Setting<BTreeMap<String, Setting<AnalyzerSettings>>>,
-    search_cutoff: Setting<u64>,
 }
 
 impl<'a, 't, 'i> Settings<'a, 't, 'i> {
@@ -171,7 +167,6 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
             filterable_fields: Setting::NotSet,
             sortable_fields: Setting::NotSet,
             criteria: Setting::NotSet,
-            distinct_field: Setting::NotSet,
             synonyms: Setting::NotSet,
             primary_key: Setting::NotSet,
             typo_config: Setting::NotSet,
@@ -182,7 +177,6 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
             proximity_precision: Setting::NotSet,
             embedder_settings: Setting::NotSet,
             analyzer_settings: Setting::NotSet,
-            search_cutoff: Setting::NotSet,
 
             indexer_config,
         }
@@ -219,13 +213,20 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
     pub fn set_criteria(&mut self, criteria: Vec<Criterion>) {
         self.criteria = Setting::Set(criteria);
     }
-
-    pub fn reset_distinct_field(&mut self) {
-        self.distinct_field = Setting::Reset;
+    pub fn set_typo_config(&mut self, typo_config: TypoSettings) {
+        self.typo_config = Setting::Set(typo_config);
     }
 
-    pub fn set_distinct_field(&mut self, distinct_field: String) {
-        self.distinct_field = Setting::Set(distinct_field);
+    pub fn reset_typo_config(&mut self) {
+        self.typo_config = Setting::Reset;
+    }
+
+    pub fn set_split_join_config(&mut self, split_join_config: SplitJoinSettings) {
+        self.split_join_config = Setting::Set(split_join_config);
+    }
+
+    pub fn reset_split_join_config(&mut self) {
+        self.split_join_config = Setting::Reset;
     }
 
     pub fn reset_synonyms(&mut self) {
@@ -292,13 +293,6 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
         self.analyzer_settings = Setting::Reset;
     }
 
-    pub fn set_search_cutoff(&mut self, value: u64) {
-        self.search_cutoff = Setting::Set(value);
-    }
-
-    pub fn reset_search_cutoff(&mut self) {
-        self.search_cutoff = Setting::Reset;
-    }
 
     #[tracing::instrument(
         level = "trace"
@@ -379,18 +373,6 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
         res.map(EmbeddingConfigs::new)
     }
 
-    fn update_distinct_field(&mut self) -> Result<bool> {
-        match self.distinct_field {
-            Setting::Set(ref attr) => {
-                self.index.put_distinct_field(self.wtxn, attr)?;
-            }
-            Setting::Reset => {
-                self.index.delete_distinct_field(self.wtxn)?;
-            }
-            Setting::NotSet => return Ok(false),
-        }
-        Ok(true)
-    }
 
     /// Updates the index's searchable attributes. This causes the field map to be recomputed to
     /// reflect the order of the searchable attributes.
@@ -583,14 +565,14 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
         match self.typo_config {
             Setting::NotSet |
             Setting::Set(
-                TypoSetting{
+                TypoSettings {
                     max_typos: Setting::NotSet,
                     word_len_one_typo: Setting::NotSet,
                     word_len_two_typo: Setting::NotSet
                 }
             ) => (),
             Setting::Set(typo_config) => {
-                let TypoSetting{
+                let TypoSettings {
                     word_len_two_typo,
                     max_typos,
                     word_len_one_typo
@@ -638,13 +620,13 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
         match self.split_join_config {
             Setting::NotSet |
             Setting::Set(
-                SplitJoinSetting{
+                SplitJoinSettings {
                     ngram: Setting::NotSet,
                     split_take_n: Setting::NotSet,
                 }
             ) => (),
             Setting::Set(typo_config) => {
-                let SplitJoinSetting{
+                let SplitJoinSettings {
                     split_take_n,
                     ngram
                 } = typo_config;
@@ -880,24 +862,6 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
         Ok(update)
     }
 
-    fn update_search_cutoff(&mut self) -> Result<bool> {
-        let changed = match self.search_cutoff {
-            Setting::Set(new) => {
-                let old = self.index.search_cutoff(self.wtxn)?;
-                if old == Some(new) {
-                    false
-                } else {
-                    self.index.put_search_cutoff(self.wtxn, new)?;
-                    true
-                }
-            }
-            Setting::Reset => self.index.delete_search_cutoff(self.wtxn)?,
-            Setting::NotSet => false,
-        };
-
-        Ok(changed)
-    }
-
     pub fn execute<FP, FA>(mut self, progress_callback: FP, should_abort: FA) -> Result<()>
     where
         FP: Fn(UpdateIndexingStep) + Sync,
@@ -918,7 +882,6 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
 
         self.update_filterable()?;
         self.update_sortable()?;
-        self.update_distinct_field()?;
         self.update_criteria()?;
         self.update_primary_key()?;
         self.update_split_join_config()?;
@@ -935,9 +898,6 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
 
         let embedding_configs_updated = self.update_embedding_configs()?;
 
-
-        // never trigger re-indexing
-        self.update_search_cutoff()?;
 
         if analyzer_configs_updated
             || faceted_updated
@@ -1650,7 +1610,7 @@ pub fn validate_embedding_settings(
 //                     pagination_max_total_hits,
 //                     proximity_precision,
 //                     embedder_settings,
-//                     search_cutoff,
+//
 //                     typo_config,
 //                     analyzer_settings,
 //                     split_join_config
@@ -1670,7 +1630,7 @@ pub fn validate_embedding_settings(
 //                 assert!(matches!(pagination_max_total_hits, Setting::NotSet));
 //                 assert!(matches!(proximity_precision, Setting::NotSet));
 //                 assert!(matches!(embedder_settings, Setting::NotSet));
-//                 assert!(matches!(search_cutoff, Setting::NotSet));
+//
 //             })
 //             .unwrap();
 //     }

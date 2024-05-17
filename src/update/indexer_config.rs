@@ -1,5 +1,5 @@
 use grenad::CompressionType;
-use rayon::ThreadPool;
+use crate::ThreadPoolNoAbort;
 
 #[derive(Debug)]
 pub struct IndexerConfig {
@@ -9,7 +9,7 @@ pub struct IndexerConfig {
     pub max_memory: Option<usize>,
     pub chunk_compression_type: CompressionType,
     pub chunk_compression_level: Option<u32>,
-    pub thread_pool: Option<ThreadPool>,
+    pub thread_pool: Option<ThreadPoolNoAbort>,
     pub max_positions_per_attributes: Option<u32>,
     pub skip_index_budget: bool,
 }

@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::documents::{self, DocumentsBatchCursorError};
 use crate::{CriterionError, DocumentId, FieldId, Object, SortError};
+use crate::update::thread_pool_no_abort::PanicCatched;
 
 
 #[derive(Error, Debug)]
@@ -46,6 +47,8 @@ pub enum InternalError {
     InvalidDatabaseTyping,
     #[error(transparent)]
     RayonThreadPool(#[from] ThreadPoolBuildError),
+    #[error(transparent)]
+    PanicInThreadPool(#[from] PanicCatched),
     #[error(transparent)]
     SerdeJson(#[from] serde_json::Error),
     #[error(transparent)]
@@ -190,9 +193,9 @@ only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and undersco
     TooManyEmbedders(usize),
     #[error("Cannot find embedder with name `{0}`.")]
     InvalidEmbedder(String),
-    #[error("Cannot find tokenizer with name `{0}`.")]
+    #[error("Cannot find analyzer with name `{0}`.")]
     InvalidAnalyzer(String),
-    #[error("Cannot find default tokenizer.")]
+    #[error("Cannot find default analyzer.")]
     NoDefaultAnalyzer,
     #[error("Too many vectors for document with id {0}: found {1}, but limited to 256.")]
     TooManyVectors(String, usize),

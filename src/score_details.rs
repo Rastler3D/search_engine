@@ -3,15 +3,15 @@ use std::cmp::Ordering;
 use itertools::Itertools;
 use serde::Serialize;
 
-use crate::distance_between_two_points;
+use crate::{ distance_between_two_points};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScoreDetails {
     Words(Words),
     Typo(Typo),
-    Proximity(Rank),
+    Proximity(Proximity),
     Exactness(ExactWords),
-    Attribute(Rank),
+    Attribute(Attribute),
     Sort(Sort),
     Vector(Vector),
 }
@@ -37,8 +37,8 @@ impl ScoreDetails {
         match self {
             ScoreDetails::Words(details) => Some(details.rank()),
             ScoreDetails::Typo(details) => Some(details.rank()),
-            ScoreDetails::Proximity(details) => Some(*details),
-            ScoreDetails::Attribute(details) => Some(*details),
+            ScoreDetails::Proximity(details) => Some(details.rank()),
+            ScoreDetails::Attribute(details) => Some(details.rank()),
             ScoreDetails::Exactness(details) => Some(details.rank()),
             ScoreDetails::Sort(_) => None,
             ScoreDetails::Vector(_) => None,
@@ -78,8 +78,8 @@ impl ScoreDetails {
         match self {
             ScoreDetails::Words(w) => RankOrValue::Rank(w.rank()),
             ScoreDetails::Typo(t) => RankOrValue::Rank(t.rank()),
-            ScoreDetails::Proximity(p) => RankOrValue::Rank(*p),
-            ScoreDetails::Attribute(f) => RankOrValue::Rank(*f),
+            ScoreDetails::Proximity(p) => RankOrValue::Rank(p.rank()),
+            ScoreDetails::Attribute(f) => RankOrValue::Rank(f.rank()),
             ScoreDetails::Exactness(e) => RankOrValue::Rank(e.rank()),
             ScoreDetails::Sort(sort) => RankOrValue::Sort(sort),
             ScoreDetails::Vector(vector) => {
@@ -118,15 +118,19 @@ impl ScoreDetails {
                 ScoreDetails::Proximity(proximity) => {
                     let proximity_details = serde_json::json!({
                         "order": order,
-                        "score": proximity.local_score(),
+                        "proximity": proximity.proximity,
+                        "maxProximity": proximity.max_proximity,
+                        "score": proximity.rank().local_score(),
                     });
                     details_map.insert("proximity".into(), proximity_details);
                     order += 1;
                 }
-                ScoreDetails::Attribute(fid) => {
+                ScoreDetails::Attribute(attribute) => {
                     let fid_details = serde_json::json!({
                         "order": order,
-                        "score": fid.local_score(),
+                        "attribute": attribute.attribute,
+                        "maxAttribute": attribute.max_attribute,
+                        "score": attribute.rank().local_score(),
                     });
                     details_map.insert("attribute".into(), fid_details);
                     order += 1;
@@ -134,8 +138,8 @@ impl ScoreDetails {
                 ScoreDetails::Exactness(exact_words) => {
                     let exactness_details = serde_json::json!({
                         "order": order,
-                        "matchingWords": exact_words.matching_words,
-                        "maxMatchingWords": exact_words.max_matching_words,
+                        "exactWords": exact_words.exact_words,
+                        "maxExactWords": exact_words.max_exact_words,
                         "score": exact_words.rank().local_score(),
                     });
                     details_map.insert("exactness".into(), exactness_details);
@@ -168,14 +172,6 @@ impl ScoreDetails {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ScoringStrategy {
-    /// Don't compute scores
-    #[default]
-    Skip,
-    /// Compute detailed scores
-    Detailed,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Words {
@@ -199,22 +195,44 @@ impl Words {
 /// if no words from the query appear exactly in the document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExactWords {
-    pub matching_words: u32,
-    pub max_matching_words: u32,
+    pub exact_words: u32,
+    pub max_exact_words: u32,
 }
 
 impl ExactWords {
     pub fn rank(&self) -> Rank {
         // 0 matching words means last rank (1)
-        Rank { rank: self.matching_words + 1, max_rank: self.max_matching_words + 1 }
+        Rank { rank: self.exact_words + 1, max_rank: self.max_exact_words + 1 }
     }
 
     pub(crate) fn from_rank(rank: Rank) -> Self {
         // last rank (1) means that 0 words from the query appear exactly in the document.
         // first rank (max_rank) means that (max_rank - 1) words from the query appear exactly in the document.
         Self {
-            matching_words: rank.rank.saturating_sub(1),
-            max_matching_words: rank.max_rank.saturating_sub(1),
+            exact_words: rank.rank.saturating_sub(1),
+            max_exact_words: rank.max_rank.saturating_sub(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Proximity {
+    pub proximity: u32,
+    pub max_proximity: u32,
+}
+
+impl Proximity {
+    pub fn rank(&self) -> Rank {
+        Rank {
+            rank: (self.max_proximity + 1).saturating_sub(self.proximity),
+            max_rank: (self.max_proximity + 1),
+        }
+    }
+
+    pub fn from_rank(rank: Rank) -> Proximity {
+        Proximity {
+            proximity: rank.max_rank.saturating_sub(rank.rank),
+            max_proximity: rank.max_rank.saturating_sub(1),
         }
     }
 }
@@ -233,13 +251,6 @@ impl Typo {
         }
     }
 
-    // max_rank = max_typo + 1
-    // max_typo = max_rank - 1
-    //
-    // rank = max_typo - typo + 1
-    // rank = max_rank - 1 - typo + 1
-    // rank + typo = max_rank
-    // typo = max_rank - rank
     pub fn from_rank(rank: Rank) -> Typo {
         Typo {
             typo_count: rank.max_rank.saturating_sub(rank.rank),
@@ -247,6 +258,26 @@ impl Typo {
         }
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Attribute {
+    pub attribute: u32,
+    pub max_attribute: u32,
+}
+
+impl Attribute {
+    pub fn rank(&self) -> Rank {
+        Rank { rank: self.attribute + 1, max_rank: self.max_attribute + 1 }
+    }
+
+    pub(crate) fn from_rank(rank: Rank) -> Self {
+        Self {
+            attribute: rank.rank.saturating_sub(1),
+            max_attribute: rank.max_rank.saturating_sub(1),
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Rank {

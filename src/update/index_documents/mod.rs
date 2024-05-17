@@ -38,7 +38,7 @@ use crate::update::{
     IndexerConfig, UpdateIndexingStep, WordPrefixDocids, WordPrefixIntegerDocids, WordsPrefixesFst,
 };
 use crate::vector::EmbeddingConfigs;
-use crate::{CboRoaringBitmapCodec, Index, Result};
+use crate::{CboRoaringBitmapCodec, Index, Result, ThreadPoolNoAbortBuilder};
 
 static MERGED_DATABASE_COUNT: usize = 7;
 static PREFIX_DATABASE_COUNT: usize = 3 ;
@@ -321,14 +321,14 @@ where
             None => {
                 // We initialize a bakcup pool with the default
                 // settings if none have already been set.
-                backup_pool = rayon::ThreadPoolBuilder::new().build()?;
+                backup_pool = ThreadPoolNoAbortBuilder::new().build()?;
                 &backup_pool
             }
             #[cfg(test)]
             None => {
                 // We initialize a bakcup pool with the default
                 // settings if none have already been set.
-                backup_pool = rayon::ThreadPoolBuilder::new().num_threads(1).build()?;
+                backup_pool = ThreadPoolNoAbortBuilder::new().num_threads(1).build()?;
                 &backup_pool
             }
         };
@@ -348,13 +348,7 @@ where
         let field_id_map = self.index.fields_ids_map(self.wtxn)?;
 
 
-
-        let analyzers = self.index.analyzers(self.wtxn)?;
-        let analyzer = if let Some(analyzer_name) = &self.analyzer{
-            analyzers.get(analyzer_name).ok_or_else(|| UserError::InvalidAnalyzer(analyzer_name.clone()))?
-        } else {
-            analyzers.get_default().ok_or_else(|| UserError::NoDefaultAnalyzer)?
-        };
+        let analyzer = self.index.analyzer(self.wtxn, &self.analyzer)?;
         let proximity_precision = self.index.proximity_precision(self.wtxn)?.unwrap_or_default();
 
         let pool_params = GrenadParameters {
@@ -539,7 +533,7 @@ where
             }
 
             Ok(())
-        })?;
+        }).map_err(InternalError::from)??;
 
         // We write the field distribution into the main database
         self.index.put_field_distribution(self.wtxn, &field_distribution)?;
@@ -568,7 +562,7 @@ where
                     writer.build(wtxn, &mut rng, None)?;
                 }
                 Result::Ok(())
-            })?;
+            }).map_err(InternalError::from)??;
         }
 
         self.execute_prefix_databases(

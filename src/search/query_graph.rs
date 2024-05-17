@@ -7,19 +7,20 @@ use fst::{IntoStreamer, Streamer};
 use fst::automaton::Str;
 use itertools::Itertools;
 use levenshtein_automata::LevenshteinAutomatonBuilder;
+use once_cell::sync::Lazy;
 use thiserror::Error;
 use crate::search::context::Context;
 use crate::search::fst_utils::{Complement, Intersection, StartsWith, Union};
 use crate::search::query_parser::{DerivativeTerm, OriginalTerm, Term, TermKind};
 use crate::search::utils::bit_set::BitSet;
 use crate::search::utils::vec_map::VecMap;
-use crate::Result;
+use crate::{Result, TermsMatchingStrategy};
 use crate::update::split_config::SplitJoinConfig;
 use crate::update::typo_config::TypoConfig;
 
-static LEVDIST2: LazyLock<LevenshteinAutomatonBuilder> = LazyLock::new(|| LevenshteinAutomatonBuilder::new(2, true));
-static LEVDIST1: LazyLock<LevenshteinAutomatonBuilder> = LazyLock::new(|| LevenshteinAutomatonBuilder::new(1, true));
-
+pub static LEVDIST2: LazyLock<LevenshteinAutomatonBuilder> = LazyLock::new(|| LevenshteinAutomatonBuilder::new(2, true));
+pub static LEVDIST1: LazyLock<LevenshteinAutomatonBuilder> = LazyLock::new(|| LevenshteinAutomatonBuilder::new(1, true));
+pub static LEVDIST0: LazyLock<LevenshteinAutomatonBuilder> = LazyLock::new(|| LevenshteinAutomatonBuilder::new(0, true));
 #[derive(Debug)]
 pub enum NodeData{
     Start,
@@ -39,7 +40,9 @@ pub struct QueryGraph{
     pub root: usize,
     pub end: usize,
     pub nodes: Vec<GraphNode>,
-    pub query_word: usize
+    pub query_max_typos: usize,
+    pub query_terms: usize,
+    pub query_words: usize,
 }
 
 #[derive(Error, Debug)]
@@ -51,13 +54,19 @@ pub enum QueryGraphError{
 impl QueryGraph {
     pub fn from_query(terms: Vec<Term>, context: &mut impl Context) -> Result<QueryGraph>{
 
-        let graph = Self::build_flat_graph(terms)
+        let graph = Self::build_flat_graph(terms, context)?
             .ngrams(context)?
             .prefixes(context)?
             .typos(context)?
             .synonyms(context)?
-            .splits(context)?;
+            .splits(context)?
+            .short_circuit(context)?;
+
         Ok(graph)
+    }
+
+    pub fn placeholder(context: &mut impl Context) -> Result<QueryGraph>{
+        Self::build_flat_graph(Vec::new(), context)
     }
 
     fn ngrams(mut self, context: &mut impl Context) -> Result<QueryGraph>{
@@ -121,6 +130,26 @@ impl QueryGraph {
         };
 
         Some(node)
+    }
+
+    fn short_circuit(mut self, context: &mut impl Context) -> Result<QueryGraph>{
+        let matching_strategy = context.term_matching_strategy();
+        if let TermsMatchingStrategy::Last = matching_strategy{
+            let nodes = (0..self.nodes.len());
+            for mut node_id in nodes{
+                let Ok([node, end_node]) = self.nodes.get_many_mut([node_id, self.end]) else { continue };
+                match &node.data {
+                    NodeData::Term(_) => {
+                        node.successors.insert(self.end);
+                        end_node.predecessors.insert(node_id);
+                    },
+                    _ => continue
+                }
+            }
+        }
+
+
+        Ok(self)
     }
 
     fn prefixes(mut self, _: &mut impl Context) -> Result<QueryGraph>{
@@ -434,25 +463,41 @@ impl QueryGraph {
 
         self.nodes.push(node);
     }
-    fn build_flat_graph(terms: Vec<Term>) -> QueryGraph{
+    fn build_flat_graph(terms: Vec<Term>, context: &mut impl Context) -> Result<QueryGraph>{
+        let typo_config = context.typo_config()?;
         let mut nodes = vec![GraphNode{ data: NodeData::Start, successors: BitSet::default(), predecessors: BitSet::default() }];
         let mut last_id = 0;
+        let mut query_terms = 0;
         let mut query_words = 0;
+        let mut query_max_typos = 0;
         for term in terms{
+            query_max_typos += Self::typos_allowed(&term, typo_config);
+            query_words += term.position.clone().count();
+            query_terms +=1;
+
             last_id = Self::append_successor(&mut nodes, last_id, NodeData::Term(term));
-            query_words+=1;
         }
 
         last_id = Self::append_successor(&mut nodes, last_id, NodeData::End);
 
-        QueryGraph{
+        Ok(QueryGraph{
             root: 0,
             end: last_id,
             nodes: nodes,
-            query_word: query_words
-        }
+            query_max_typos,
+            query_terms,
+            query_words,
+        })
     }
 
+    fn typos_allowed(term: &Term, typo_config: TypoConfig) -> usize{
+        match &term.term_kind {
+            TermKind::Normal(OriginalTerm::Word(text)) | TermKind::Normal(OriginalTerm::Prefix(text)) => {
+                typo_config.allowed_typos(text) as usize
+            },
+            _ => 0
+        }
+    }
     fn append_successor(nodes: &mut Vec<GraphNode>, node_id: usize,  successor: NodeData) -> usize{
         let successor_id = nodes.len();
         nodes[node_id].successors.insert(successor_id);
@@ -469,15 +514,21 @@ impl QueryGraph {
 
 #[cfg(test)]
 pub mod tests {
+    use std::num::NonZeroUsize;
+    use arroy::distances::Angular;
+    use arroy::{ItemId, Reader};
     use fst::Set;
+    use heed::RoTxn;
     use crate::search::query_parser::parse_query;
     use crate::search::query_parser::tests::build_analyzer;
     use analyzer::analyzer::Analyzer;
     use rand::prelude::StdRng;
     use rand::{Rng, SeedableRng};
     use roaring::RoaringBitmap;
-    use crate::Criterion;
+    use crate::{Criterion, FieldId, FieldsIdsMap};
     use crate::search::context::{Fid, Position};
+    use crate::search::facet::{AscendingSortIter, DescendingSortIter};
+    use crate::search::resolve_query_graph::{resolve_node_docids, resolve_path_docids};
     use crate::update::split_config::SplitJoinConfig;
     use super::*;
 
@@ -487,9 +538,10 @@ pub mod tests {
         postings: HashMap<String, RoaringBitmap>,
         positions: HashMap<String, Vec<((Fid, Position),RoaringBitmap)>>,
         exact_words: fst::Set<Cow<'static, [u8]>>,
-        all_docids: RoaringBitmap
+        all_docids: RoaringBitmap,
+        empty: RoaringBitmap,
     }
-    impl Context for TestContext {
+    impl<'t> Context<'t> for TestContext {
         fn word_docids(&mut self, word: &str) -> Result<RoaringBitmap> {
             Ok(self.postings.get(word).cloned().unwrap_or(RoaringBitmap::new()))
         }
@@ -506,6 +558,10 @@ pub mod tests {
 
         fn word_documents_count(&mut self, word: &str) -> Result<u64> {
             todo!()
+        }
+
+        fn term_matching_strategy(&self) -> TermsMatchingStrategy {
+            TermsMatchingStrategy::Last
         }
 
         fn all_docids(&self) -> Result<RoaringBitmap> {
@@ -531,6 +587,10 @@ pub mod tests {
 
         fn exact_words(&mut self) -> Result<Set<Cow<[u8]>>>{
             Ok(self.exact_words.clone())
+        }
+
+        fn searchable_fields_ids(&mut self) -> Result<Option<Vec<FieldId>>> {
+            Ok(Some(vec![1,2,3,4,5]))
         }
 
         fn word_pair_frequency(
@@ -597,15 +657,19 @@ pub mod tests {
 
 
         fn ranking_rules(&self) -> Result<Vec<Criterion>> {
-            Ok(vec![Criterion::Proximity])
+            Ok(vec![Criterion::Typo, Criterion::Attribute, Criterion::Proximity])
+        }
+
+        fn field_ids(&self) -> Result<FieldsIdsMap> {
+            todo!()
         }
 
         fn word_fid_docids(&mut self, word: &str, fid: Fid) -> Result<RoaringBitmap> {
-            todo!()
+            Ok(self.postings.get(word).cloned().unwrap_or(RoaringBitmap::new()))
         }
 
         fn prefix_fid_docids(&mut self, prefix: &str, fid: Fid) -> Result<RoaringBitmap> {
-            todo!()
+            Ok(self.postings.get(prefix).cloned().unwrap_or(RoaringBitmap::new()))
         }
 
         fn word_fids(&mut self, word: &str) -> Result<Vec<Fid>> {
@@ -617,11 +681,15 @@ pub mod tests {
         }
 
         fn node_docids(&mut self, node_id: usize, graph: &QueryGraph) -> Result<&RoaringBitmap> {
-            todo!()
+            let docids = resolve_node_docids(&graph.nodes[node_id], self)?;
+            self.empty = docids;
+            Ok(&self.empty)
         }
 
         fn path_docids(&mut self, path: BitSet, graph: &QueryGraph) -> Result<&RoaringBitmap> {
-            todo!()
+            let docids = resolve_path_docids(path, graph, self)?;
+            self.empty = docids;
+            Ok(&self.empty)
         }
 
         fn phrase_docids(&mut self, path: &[String]) -> Result<&RoaringBitmap> {
@@ -629,6 +697,37 @@ pub mod tests {
         }
 
         fn split_docids(&mut self, path: &(String, String)) -> Result<&RoaringBitmap> {
+            match self.postings.get(&format!("{} {}", &path.0, &path.1)) {
+                Some(rb) => Ok(rb),
+                _ => Ok(&self.empty),
+            }
+        }
+
+        fn embedder_category_id(&self, embedder_name: &str) -> Result<u8> {
+            todo!()
+        }
+
+        fn vector_reader(&self, index: u16) -> arroy::Result<Reader<Angular>> {
+            todo!()
+        }
+
+        fn ascending_number_sort<'a>(&self, tnx: &'a RoTxn<'a>, fid: Fid, candidates: RoaringBitmap) -> Result<AscendingSortIter<'a>> {
+            todo!()
+        }
+
+        fn ascending_string_sort<'a>(&self, tnx: &'a RoTxn<'a>, fid: Fid, candidates: RoaringBitmap) -> Result<AscendingSortIter<'a>> {
+            todo!()
+        }
+
+        fn descending_number_sort<'a>(&self, tnx: &'a RoTxn<'a>, fid: Fid, candidates: RoaringBitmap) -> Result<DescendingSortIter<'a>> {
+            todo!()
+        }
+
+        fn txn(&self) -> &'t RoTxn<'t> {
+            todo!()
+        }
+
+        fn descending_string_sort<'a>(&self, tnx: &'a RoTxn<'a>, fid: Fid, candidates: RoaringBitmap) -> Result<DescendingSortIter<'a>> {
             todo!()
         }
     }
@@ -715,7 +814,8 @@ pub mod tests {
                     (String::from("quickbrown fox"),random_position(rng,   8000)),
                 ]),
                 exact_words,
-                all_docids: RoaringBitmap::new()
+                all_docids: RoaringBitmap::new(),
+                empty: RoaringBitmap::new(),
             };
 
             let mut docids = RoaringBitmap::new();

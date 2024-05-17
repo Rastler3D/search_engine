@@ -11,7 +11,7 @@ impl Display for Term {
                 match term {
                     DerivativeTerm::Ngram(text, ngrams) => {
                         writeln!(f, "{{")?;
-                        writeln!(f, "\t label: {text}")?;
+                        writeln!(f, "\t label: {text:?}")?;
                         writeln!(f, "\t kind: Derivation")?;
                         writeln!(f, "\t type: Ngram")?;
                         writeln!(f, "\t ngrams: {ngrams}")?;
@@ -25,7 +25,7 @@ impl Display for Term {
                         writeln!(f, "Synonyms {{\n")?;
                         for (field, text) in texts.iter().enumerate(){
                             writeln!(f, "\t {field}: {{")?;
-                            writeln!(f, "\t\t  label: {text}")?;
+                            writeln!(f, "\t\t  label: {text:?}")?;
                             writeln!(f, "\t\t  kind: Derivation")?;
                             writeln!(f, "\t\t  type: Synonym")?;
                             writeln!(f, "\t\t  original_term: {orig_idx}")?;
@@ -41,7 +41,7 @@ impl Display for Term {
                         writeln!(f, "Prefix {typos} typos {{\n")?;
                         for (field, text) in texts.iter().enumerate(){
                             writeln!(f, "\t {field}: {{")?;
-                            writeln!(f, "\t\t  label: {text}")?;
+                            writeln!(f, "\t\t  label: {text:?}")?;
                             writeln!(f, "\t\t  kind: Derivation")?;
                             writeln!(f, "\t\t  type: Prefix Typo")?;
                             writeln!(f, "\t\t  typos: {typos}")?;
@@ -58,7 +58,7 @@ impl Display for Term {
                         writeln!(f, "Word {typos} typos {{\n")?;
                         for (field, text) in texts.iter().enumerate(){
                             writeln!(f, "\t {field}: {{")?;
-                            writeln!(f, "\t\t  label: {text}")?;
+                            writeln!(f, "\t\t  label: {text:?}")?;
                             writeln!(f, "\t\t  kind: Derivation")?;
                             writeln!(f, "\t\t  type: Word Typo")?;
                             writeln!(f, "\t\t  typos: {typos}")?;
@@ -74,7 +74,7 @@ impl Display for Term {
                         writeln!(f, "Synonym phrases{{\n")?;
                         for (field, phrase) in phrases.iter().enumerate(){
                             writeln!(f, "\t {field}: {{")?;
-                            writeln!(f, "\t\t  label: {}", phrase.join(" "))?;
+                            writeln!(f, "\t\t  label: {:?}", phrase.join(" "))?;
                             writeln!(f, "\t\t  kind: Derivation")?;
                             writeln!(f, "\t\t  type: Synonym Phrase")?;
                             writeln!(f, "\t\t  original_term: {orig_idx}")?;
@@ -89,7 +89,7 @@ impl Display for Term {
                         writeln!(f, "Splits {{\n")?;
                         for (field, split) in splits.iter().enumerate(){
                             writeln!(f, "\t {field}: {{")?;
-                            writeln!(f, "\t\t  label: {} {}",split.0, split.1)?;
+                            writeln!(f, "\t\t  label: {:?}",format!("{} {}", split.0, split.1))?;
                             writeln!(f, "\t\t  kind: Derivation")?;
                             writeln!(f, "\t\t  type: Split")?;
                             writeln!(f, "\t\t  original_term: {orig_idx}")?;
@@ -106,7 +106,7 @@ impl Display for Term {
                 match term {
                     OriginalTerm::Word(text) => {
                         writeln!(f, "{{")?;
-                        writeln!(f, "\t label: {text}")?;
+                        writeln!(f, "\t label: {text:?}")?;
                         writeln!(f, "\t kind: Original")?;
                         writeln!(f, "\t type: Word")?;
                         writeln!(f, "\t is_exact: {}", true)?;
@@ -118,7 +118,7 @@ impl Display for Term {
                     }
                     OriginalTerm::Prefix(text) => {
                         writeln!(f, "{{")?;
-                        writeln!(f, "\t label: {text}")?;
+                        writeln!(f, "\t label: {text:?}")?;
                         writeln!(f, "\t kind: Original")?;
                         writeln!(f, "\t type: Prefix")?;
                         writeln!(f, "\t is_exact: {}", true)?;
@@ -129,7 +129,7 @@ impl Display for Term {
                     }
                     OriginalTerm::Phrase(phrase) => {
                         writeln!(f, "{{")?;
-                        writeln!(f, "\t label: {}", phrase.join(" "))?;
+                        writeln!(f, "\t label: {:?}", phrase.join(" "))?;
                         writeln!(f, "\t kind: Original")?;
                         writeln!(f, "\t type: Phrase")?;
                         writeln!(f, "\t is_exact: {}", true)?;
@@ -144,7 +144,7 @@ impl Display for Term {
                 match term {
                     OriginalTerm::Word(text) => {
                         writeln!(f, "{{")?;
-                        writeln!(f, "\t label: {text}")?;
+                        writeln!(f, "\t label: {text:?}")?;
                         writeln!(f, "\t kind: Original")?;
                         writeln!(f, "\t type: Word")?;
                         writeln!(f, "\t is_exact: {}", false)?;
@@ -156,7 +156,7 @@ impl Display for Term {
                     }
                     OriginalTerm::Prefix(text) => {
                         writeln!(f, "{{")?;
-                        writeln!(f, "\t label: {text}")?;
+                        writeln!(f, "\t label: {text:?}")?;
                         writeln!(f, "\t kind: Original")?;
                         writeln!(f, "\t type: Prefix")?;
                         writeln!(f, "\t is_exact: {}", false)?;
@@ -167,7 +167,7 @@ impl Display for Term {
                     }
                     OriginalTerm::Phrase(phrase) => {
                         writeln!(f, "{{")?;
-                        writeln!(f, "\t label: {}", phrase.join(" "))?;
+                        writeln!(f, "\t label: {:?}", phrase.join(" "))?;
                         writeln!(f, "\t kind: Original")?;
                         writeln!(f, "\t type: Phrase")?;
                         writeln!(f, "\t is_exact: {}", false)?;

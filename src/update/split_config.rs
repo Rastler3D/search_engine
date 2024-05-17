@@ -23,7 +23,7 @@ impl Default for SplitJoinConfig {
 #[derive(Debug, Copy, Clone, Default, Serialize, Deserialize, PartialEq, Eq, Deserr)]
 #[serde(default, deny_unknown_fields, rename_all = "camelCase")]
 #[deserr(rename_all = camelCase, deny_unknown_fields)]
-pub struct SplitJoinSetting{
+pub struct SplitJoinSettings {
     #[serde(default, skip_serializing_if = "Setting::is_not_set")]
     #[deserr(default)]
     pub split_take_n: Setting<usize>,

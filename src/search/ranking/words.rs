@@ -1,6 +1,5 @@
-use std::collections::{HashMap, HashSet};
-use std::ops::{ControlFlow, RangeInclusive};
-use std::time::Instant;
+use std::collections::{HashSet};
+use std::ops::{RangeInclusive};
 use roaring::RoaringBitmap;
 use crate::search::context::Context;
 use crate::search::query_graph::{GraphNode, NodeData, QueryGraph};
@@ -9,11 +8,10 @@ use crate::search::ranking::ranking_rule::{RankingRule, RankingRuleOutput};
 use crate::search::utils::bit_set::BitSet;
 use crate::search::utils::vec_map::VecMap;
 use crate::Result;
-use crate::score_details::{ ScoreDetails, Typo};
-use crate::search::query_parser::{DerivativeTerm, Term, TermKind};
-use crate::search::ranking::path_visitor::Edge;
+use crate::score_details::{ExactWords, ScoreDetails, Words};
+use crate::search::query_parser::{ Term};
 
-pub struct TypoRule<'graph>{
+pub struct WordsRule<'graph>{
     costs: VecMap<HashSet<BitSet>>,
     candidates: RoaringBitmap,
     allowed_paths: Option<HashSet<BitSet>>,
@@ -22,24 +20,24 @@ pub struct TypoRule<'graph>{
     max_cost: usize
 }
 
-impl<'graph> TypoRule<'graph> {
+impl<'graph> WordsRule<'graph> {
     pub fn new(context: &mut impl Context, graph: &'graph QueryGraph) -> Result<Self>{
-        let paths = paths_cost::<TypoCost>(graph, context);
+        let paths = paths_cost::<WordsCost>(graph, context);
         let max_cost = Self::max_cost(context, graph)?;
-        let mut costs = VecMap::with_capacity(max_cost);
+        let mut costs = VecMap::with_capacity(max_cost as usize);
         for (path, cost) in paths{
             costs.get_or_insert_with(cost, || HashSet::new()).insert(path);
         }
 
-        Ok(TypoRule{ costs, candidates: RoaringBitmap::new(), allowed_paths: None, graph, cur_cost: (max_cost+1..=max_cost), max_cost })
+        Ok(WordsRule{ costs, candidates: RoaringBitmap::new(), allowed_paths: None, graph, cur_cost: (1..=0), max_cost })
     }
     pub fn max_cost(_: &impl Context, graph: &QueryGraph) -> Result<usize>{
-        Ok(graph.query_max_typos)
+        Ok(graph.query_words)
     }
 }
 
 
-impl RankingRule for TypoRule<'_> {
+impl RankingRule for WordsRule<'_> {
 
     fn start_iteration(&mut self, _ctx: &mut dyn Context, candidates: RoaringBitmap, allowed_paths: Option<HashSet<BitSet>>) -> Result<()> {
         self.candidates = candidates;
@@ -50,7 +48,7 @@ impl RankingRule for TypoRule<'_> {
     }
 
     fn next_bucket(&mut self, ctx: &mut dyn Context) -> Result<Option<RankingRuleOutput>> {
-        self.cur_cost.next().map(|cost| -> Result<RankingRuleOutput> {
+        self.cur_cost.next_back().map(|cost| -> Result<RankingRuleOutput> {
             let mut bucket = RoaringBitmap::new();
             let mut good_paths = HashSet::new();
             let mut buf = RoaringBitmap::new();
@@ -70,9 +68,9 @@ impl RankingRule for TypoRule<'_> {
             };
 
             Ok(RankingRuleOutput{
-                score: ScoreDetails::Typo(Typo{
-                    typo_count: cost as u32,
-                    max_typo_count: self.max_cost as u32,
+                score: ScoreDetails::Words(Words{
+                    matching_words: cost as u32,
+                    max_matching_words: self.max_cost as u32,
                 }),
                 allowed_path: Some(good_paths),
                 candidates: bucket
@@ -82,13 +80,13 @@ impl RankingRule for TypoRule<'_> {
     }
 }
 
-pub struct TypoCost;
 
-impl Cost for TypoCost {
-    fn cost(node: &GraphNode, search_context: &impl Context) -> usize {
-        match node.data {
-            NodeData::Term(Term{ term_kind: TermKind::Derivative(DerivativeTerm::Split(_), ..), .. }) => 1,
-            NodeData::Term(Term{ term_kind: TermKind::Derivative(DerivativeTerm::PrefixTypo(_, typos) | DerivativeTerm::Typo(_, typos), ..), .. }) => typos as usize,
+pub struct WordsCost;
+
+impl Cost for WordsCost {
+    fn cost(node: &GraphNode, _: &impl Context) -> usize {
+        match &node.data {
+            NodeData::Term(Term{ position, .. }) => position.clone().count(),
             _ => 0
         }
     }

@@ -286,6 +286,19 @@ impl<'a, V> IndexMut<&'a usize> for VecMap<V> {
     }
 }
 
+impl<V> FromIterator<(usize, V)> for VecMap<V>{
+    fn from_iter<T: IntoIterator<Item=(usize, V)>>(iter: T) -> Self {
+        let iter = iter.into_iter();
+        let size = iter.size_hint().0;
+        let mut vec_map = VecMap::with_capacity(size);
+        for (key,value) in iter{
+            vec_map.insert(key, value);
+        }
+
+        vec_map
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

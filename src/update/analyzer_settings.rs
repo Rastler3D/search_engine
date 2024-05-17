@@ -3,7 +3,8 @@ use std::sync::Arc;
 use deserr::Deserr;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{RawValue, to_raw_value};
-use analyzer::analyzer::{Analyzer, BoxAnalyzer};
+use tracing::info;
+pub use analyzer::analyzer::{BoxAnalyzer};
 use analyzer::char_filter::{character_filter_layer};
 use analyzer::tokenizer::BoxTokenizer;
 use analyzer::analyzer::text_analyzer::TextAnalyzer;
@@ -12,7 +13,6 @@ use analyzer::token_filter::lower_case::LowerCaseFilter;
 use analyzer::token_filter::token_filter_layer::{BaseLevel, TokenFilterLayers};
 use analyzer::tokenizer::whitespace_tokenizer::WhitespaceTokenizer;
 use crate::update::Setting;
-use crate::vector::settings::EmbeddingSettings;
 
 
 #[derive(Clone, Serialize, Deserialize, Deserr)]
@@ -20,7 +20,7 @@ use crate::vector::settings::EmbeddingSettings;
 #[deserr(rename_all = camelCase, deny_unknown_fields)]
 pub struct AnalyzerSettings {
     #[deserr(try_from(&String) = serde_json::from_str -> serde_json::error::Error)]
-    analyzer: BoxAnalyzer
+    pub analyzer: BoxAnalyzer
 }
 
 impl AnalyzerSettings{
@@ -41,6 +41,16 @@ impl AnalyzerSettings{
     }
 }
 
+impl Eq for AnalyzerSettings {
+
+}
+
+impl PartialEq for AnalyzerSettings{
+    fn eq(&self, other: &Self) -> bool {
+        AnalyzerConfig::from(self) == AnalyzerConfig::from(other)
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct AnalyzerConfig {
     pub analyzer_config: Box<RawValue>,
@@ -58,7 +68,15 @@ impl PartialEq for AnalyzerConfig{
 
 impl From<AnalyzerSettings> for AnalyzerConfig{
     fn from(value: AnalyzerSettings) -> Self {
-        let analyzer_config = to_raw_value(&value).unwrap();
+        let analyzer_config = to_raw_value(&value.analyzer).unwrap();
+
+        Self{ analyzer_config }
+    }
+}
+
+impl From<&AnalyzerSettings> for AnalyzerConfig{
+    fn from(value: &AnalyzerSettings) -> Self {
+        let analyzer_config = to_raw_value(value).unwrap();
 
         Self{ analyzer_config }
     }
@@ -69,7 +87,7 @@ impl AnalyzerConfig{
         Box::<str>::from(self.analyzer_config).into_string()
     }
 }
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct AnalyzerConfigs(HashMap<String, AnalyzerConfig>);
 
 impl AnalyzerConfigs {
@@ -78,13 +96,13 @@ impl AnalyzerConfigs {
         Self(HashMap::from_iter(data))
     }
 
-    /// Get an embedder configuration and template from its name.
+    /// Get an analyzer configuration and template from its name.
     pub fn get(&self, name: &str) -> Option<BoxAnalyzer> {
         let analyzer = self.0.get(name)?;
-        serde_json::from_str(analyzer.analyzer_config.get()).ok()
+        serde_json::from_str(analyzer.analyzer_config.get()).map_err(|x| info!("{x}")).ok()
     }
 
-    /// Get the default embedder configuration, if any.
+    /// Get the default analyzer configuration, if any.
     pub fn get_default(&self) -> Option<BoxAnalyzer> {
         self.get(self.get_default_analyzer_name())
     }

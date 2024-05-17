@@ -1,12 +1,12 @@
-pub use facet_sort_ascending::ascending_facet_sort;
-pub use facet_sort_descending::descending_facet_sort;
+pub use facet_sort_ascending::{ascending_facet_sort, AscendingSortIter};
+pub use facet_sort_descending::{descending_facet_sort, DescendingSortIter};
 use heed::types::{Bytes, DecodeIgnore};
 use heed::{BytesDecode, RoTxn};
 use roaring::RoaringBitmap;
 
 pub use self::facet_distribution::{FacetDistribution, OrderBy, DEFAULT_VALUES_PER_FACET};
 pub use self::filter::{ Filter};
-//pub use self::search::{FacetValueHit, SearchForFacetValues};
+pub use self::search::{FacetValueHit, SearchForFacetValues};
 use crate::heed_codec::facet::{FacetGroupKeyCodec, FacetGroupValueCodec, OrderedF64Codec};
 use crate::heed_codec::BytesRefCodec;
 use crate::{Index, Result};
@@ -18,7 +18,7 @@ mod facet_sort_ascending;
 mod facet_sort_descending;
 pub mod filter;
 mod condition;
-//mod search;
+mod search;
 
 fn facet_extreme_value<'t>(
     mut extreme_it: impl Iterator<Item = heed::Result<(RoaringBitmap, &'t [u8])>> + 't,

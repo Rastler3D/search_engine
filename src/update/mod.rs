@@ -27,3 +27,4 @@ mod words_prefixes_fst;
 pub mod analyzer_settings;
 pub mod split_config;
 pub mod typo_config;
+pub mod thread_pool_no_abort;
