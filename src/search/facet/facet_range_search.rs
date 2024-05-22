@@ -8,8 +8,7 @@ use crate::heed_codec::facet::{FacetGroupKey, FacetGroupKeyCodec, FacetGroupValu
 use crate::heed_codec::BytesRefCodec;
 use crate::Result;
 
-/// Find all the document ids for which the given field contains a value contained within
-/// the two bounds.
+
 pub fn find_docids_of_facet_within_bounds<'t, BoundCodec>(
     rtxn: &'t heed::RoTxn<'t>,
     db: heed::Database<FacetGroupKeyCodec<BoundCodec>, FacetGroupValueCodec>,

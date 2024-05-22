@@ -5,7 +5,7 @@ use hf_hub::api::sync::ApiError;
 use crate::error::FaultSource;
 
 #[derive(Debug, thiserror::Error)]
-#[error("Error while generating embeddings: {inner}")]
+#[error("Ошибка при генерации векторных встраиваний: {inner}")]
 pub struct Error {
     pub inner: Box<ErrorKind>,
 }
@@ -42,43 +42,43 @@ pub struct EmbedError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedErrorKind {
-    #[error("could not tokenize: {0}")]
+    #[error("не удалось выполнить токенизацию: {0}")]
     Tokenize(Box<dyn std::error::Error + Send + Sync>),
-    #[error("unexpected tensor shape: {0}")]
+    #[error("неожиданная форма тензора: {0}")]
     TensorShape(candle_core::Error),
-    #[error("unexpected tensor value: {0}")]
+    #[error("неожиданное значение тензора: {0}")]
     TensorValue(candle_core::Error),
-    #[error("could not run model: {0}")]
+    #[error("не удалось запустить модель: {0}")]
     ModelForward(candle_core::Error),
-    #[error("attempt to embed the following text in a configuration where embeddings must be user provided: {0:?}")]
+    #[error("попытка вставить следующий текст в конфигурацию, где вставки должны быть предоставлены пользователем: {0:?}")]
     ManualEmbed(String),
-    #[error("model not found. Meilisearch will not automatically download models from the Ollama library, please pull the model manually: {0:?}")]
+    #[error("модель не найдена. {0:?}")]
     OllamaModelNotFoundError(Option<String>),
-    #[error("error deserialization the response body as JSON: {0}")]
+    #[error("ошибка десериализации тела ответа в формате JSON: {0}")]
     RestResponseDeserialization(std::io::Error),
-    #[error("component `{0}` not found in path `{1}` in response: `{2}`")]
+    #[error("компонент `{0}` не найден по пути `{1}` в ответе: `{2}`")]
     RestResponseMissingEmbeddings(String, String, String),
-    #[error("unexpected format of the embedding response: {0}")]
+    #[error("неожиданный формат ответа на встраивание: {0}")]
     RestResponseFormat(serde_json::Error),
-    #[error("expected a response containing {0} embeddings, got only {1}")]
+    #[error("ожидалось получить ответ, содержащий {0} встраиваний, а получили только {1}")]
     RestResponseEmbeddingCount(usize, usize),
-    #[error("could not authenticate against embedding server: {0:?}")]
+    #[error("не удалось пройти аутентификацию на сервере встраивания: {0:?}")]
     RestUnauthorized(Option<String>),
-    #[error("sent too many requests to embedding server: {0:?}")]
+    #[error("отправлено слишком много запросов на сервер встраивания: {0:?}")]
     RestTooManyRequests(Option<String>),
-    #[error("sent a bad request to embedding server: {0:?}")]
+    #[error("отправил неверный запрос на сервер встраивания: {0:?}")]
     RestBadRequest(Option<String>),
-    #[error("received internal error from embedding server: {0:?}")]
+    #[error("получен внутреннюю ошибку от сервера встраивания: {0:?}")]
     RestInternalServerError(u16, Option<String>),
-    #[error("received HTTP {0} from embedding server: {0:?}")]
+    #[error("получен HTTP {0} от сервера встраивания: {0:?}")]
     RestOtherStatusCode(u16, Option<String>),
-    #[error("could not reach embedding server: {0}")]
+    #[error("не удалось связаться с сервером встраивания: {0}")]
     RestNetwork(ureq::Transport),
-    #[error("was expected '{}' to be an object in query '{0}'", .1.join("."))]
+    #[error("ожидалось, что '{}' будет объектом в запросе '{0}'", .1.join("."))]
     RestNotAnObject(serde_json::Value, Vec<String>),
-    #[error("while embedding tokenized, was expecting embeddings of dimension `{0}`, got embeddings of dimensions `{1}`")]
+    #[error("при встраивании токенов ожидал размерности встраивания `{0}`, а было получено размерности `{1}`.")]
     OpenAiUnexpectedDimension(usize, usize),
-    #[error("no embedding was produced")]
+    #[error("не было получено встраивание")]
     MissingEmbedding,
 }
 
@@ -263,14 +263,14 @@ impl NewEmbedderError {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("could not open config at {filename:?}: {inner}")]
+#[error("не удалось открыть конфигурацию по адресу {filename:?}: {inner}")]
 pub struct OpenConfig {
     pub filename: PathBuf,
     pub inner: std::io::Error,
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("could not deserialize config at {filename}: {inner}. Config follows:\n{config}")]
+#[error("cНе удается десериализовать конфигурацию {filename}: {inner}. Конфигурация :\n{config}")]
 pub struct DeserializeConfig {
     pub config: String,
     pub filename: PathBuf,
@@ -278,7 +278,7 @@ pub struct DeserializeConfig {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("could not open tokenizer at {filename}: {inner}")]
+#[error("не удалось открыть токенизатор по адресу {filename}: {inner}")]
 pub struct OpenTokenizer {
     pub filename: PathBuf,
     #[source]
@@ -294,16 +294,16 @@ pub enum NewEmbedderErrorKind {
     DeserializeConfig(DeserializeConfig),
     #[error(transparent)]
     OpenTokenizer(OpenTokenizer),
-    #[error("could not build weights from Pytorch weights: {0}")]
+    #[error("не удалось создать весовые коэффициенты из весов Pytorch: {0}")]
     PytorchWeight(candle_core::Error),
-    #[error("could not build weights from Safetensor weights: {0}")]
+    #[error("не удалось создать весовые коэффициенты из весов Safetensor: {0}")]
     SafetensorWeight(candle_core::Error),
-    #[error("could not spawn HG_HUB API client: {0}")]
+    #[error("не удалось породить клиента HG_HUB API: {0}")]
     NewApiFail(ApiError),
-    #[error("fetching file from HG_HUB failed: {0}")]
+    #[error("получение файла с HG_HUB не удалось: {0}")]
     ApiGet(ApiError),
-    #[error("could not determine model dimensions: test embedding failed with {0}")]
+    #[error("не удалось определить размеры модели: тестовое встраивание не удалось с {0}")]
     CouldNotDetermineDimension(EmbedError),
-    #[error("loading model failed: {0}")]
+    #[error("загрузка модели не удалась: {0}")]
     LoadModel(candle_core::Error),
 }

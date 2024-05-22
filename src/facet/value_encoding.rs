@@ -1,4 +1,4 @@
-// https://stackoverflow.com/a/43305015/1941280
+
 #[inline]
 pub fn f64_into_bytes(float: f64) -> Option<[u8; 8]> {
     if float.is_finite() {

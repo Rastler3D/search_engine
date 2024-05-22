@@ -16,7 +16,6 @@ use crate::search::query_graph::{LEVDIST0, LEVDIST1, LEVDIST2};
 use crate::update::typo_config;
 
 
-/// The maximum number of values per facet returned by the facet search route.
 const DEFAULT_MAX_NUMBER_OF_VALUES_PER_FACET: usize = 100;
 
 pub struct SearchForFacetValues<'a> {

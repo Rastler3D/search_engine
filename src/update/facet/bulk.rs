@@ -17,11 +17,7 @@ use crate::update::index_documents::{create_writer, valid_lmdb_key, writer_into_
 use crate::update::MergeFn;
 use crate::{CboRoaringBitmapCodec, CboRoaringBitmapLenCodec, FieldId, Index, Result};
 
-/// Algorithm to insert elememts into the `facet_id_(string/f64)_docids` databases
-/// by rebuilding the database "from scratch".
-///
-/// First, the new elements are inserted into the level 0 of the database. Then, the
-/// higher levels are cleared and recomputed from the content of level 0.
+
 pub struct FacetsUpdateBulk<'i> {
     index: &'i Index,
     group_size: u8,

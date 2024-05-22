@@ -10,17 +10,7 @@ use crate::heed_codec::facet::{FacetGroupKey, FacetGroupKeyCodec, FacetGroupValu
 use crate::heed_codec::BytesRefCodec;
 use crate::DocumentId;
 
-/// Call the given closure on the facet distribution of the candidate documents.
-///
-/// The arguments to the closure are:
-/// - the facet value, as a byte slice
-/// - the number of documents among the candidates that contain this facet value
-/// - the id of a document which contains the facet value. Note that this document
-///   is not necessarily from the list of candidates, it is simply *any* document which
-///   contains this facet value.
-///
-/// The return value of the closure is a `ControlFlow<()>` which indicates whether we should
-/// keep iterating over the different facet values or stop.
+
 pub fn lexicographically_iterate_over_facet_distribution<'t, CB>(
     rtxn: &'t heed::RoTxn<'t>,
     db: heed::Database<FacetGroupKeyCodec<BytesRefCodec>, FacetGroupValueCodec>,

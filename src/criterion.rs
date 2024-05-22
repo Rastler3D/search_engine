@@ -8,47 +8,44 @@ use crate::{AscDesc, Member};
 
 #[derive(Error, Debug)]
 pub enum CriterionError {
-    #[error("`{name}` ranking rule is invalid. Valid ranking rules are words, typo, sort, proximity, attribute, exactness and custom ranking rules.")]
+    #[error("Правило ранжирования `{name}` недействительно. К допустимым правилам ранжирования относятся: words, typo, sort, proximity, attribute, exactness и пользовательские правила ранжирования.")]
     InvalidName { name: String },
-    #[error("`{name}` is a reserved keyword and thus can't be used as a ranking rule")]
+    #[error("`{name}` является зарезервированным ключевым словом и поэтому не может быть использовано в качестве правила ранжирования")]
     ReservedName { name: String },
     #[error(
-        "`{name}` is a reserved keyword and thus can't be used as a ranking rule. \
-`{name}` can only be used for sorting at search time"
+        "`{name}` является зарезервированным ключевым словом и поэтому не может быть использовано в качестве правила ранжирования. \
+`{name}` может быть использовано только для сортировки во время поиска"
     )]
     ReservedNameForSort { name: String },
     #[error(
-        "`{name}` is a reserved keyword and thus can't be used as a ranking rule. \
-`{name}` can only be used for filtering at search time"
+        "`{name}` является зарезервированным ключевым словом и поэтому не может быть использовано в качестве правила ранжирования. \
+`{name}` может быть использовано только для фильтрации во время поиска"
     )]
     ReservedNameForFilter { name: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum Criterion {
-    /// Sorted by decreasing number of matched query terms.
-    /// Query words at the front of an attribute is considered better than if it was at the back.
+
     Words,
-    /// Sorted by increasing number of typos.
+
     Typo,
-    /// Sorted by increasing distance between matched query terms.
+
     Proximity,
-    /// Documents with quey words contained in more important
-    /// attributes are considered better.
+
     Attribute,
-    /// Dynamically sort at query time the documents. None, one or multiple Asc/Desc sortable
-    /// attributes can be used in place of this criterion at query time.
+
     Sort,
-    /// Sorted by the similarity of the matched words with the query words.
+
     Exactness,
-    /// Sorted by the increasing value of the field specified.
+
     Asc(String),
-    /// Sorted by the decreasing value of the field specified.
+
     Desc(String),
 }
 
 impl Criterion {
-    /// Returns the field name parameter of this criterion.
+
     pub fn field_name(&self) -> Option<&str> {
         match self {
             Criterion::Asc(name) | Criterion::Desc(name) => Some(name),

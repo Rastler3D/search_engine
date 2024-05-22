@@ -597,8 +597,8 @@ impl<'a, 't, 'i> Settings<'a, 't, 'i> {
                 };
 
                 let new_config = TypoConfig{
-                    word_len_two_typo: one,
-                    word_len_one_typo: two,
+                    word_len_two_typo: two,
+                    word_len_one_typo: one,
                     max_typos: typos
                 };
 

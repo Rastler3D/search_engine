@@ -25,9 +25,9 @@ impl NewPromptError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum NewPromptErrorKind {
-    #[error("cannot parse template: {0}")]
+    #[error("Невозможно разобрать шаблон: {0}")]
     CannotParseTemplate(liquid::Error),
-    #[error("template contains invalid fields: {0}. Only `doc.*`, `fields[i].name`, `fields[i].value` are supported")]
+    #[error("Шаблон содержит недопустимые поля: {0}. Только `doc.*`, `fields[i].name`, `fields[i].value` допустимы")]
     InvalidFieldsInTemplate(liquid::Error),
 }
 
@@ -45,7 +45,7 @@ impl RenderPromptError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderPromptErrorKind {
-    #[error("missing field in document: {0}")]
+    #[error("отсутствующее поле в документе: {0}")]
     MissingContext(liquid::Error),
 }
 

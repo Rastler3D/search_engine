@@ -99,7 +99,7 @@ impl AnalyzerConfigs {
     /// Get an analyzer configuration and template from its name.
     pub fn get(&self, name: &str) -> Option<BoxAnalyzer> {
         let analyzer = self.0.get(name)?;
-        serde_json::from_str(analyzer.analyzer_config.get()).map_err(|x| info!("{x}")).ok()
+        serde_json::from_str(analyzer.analyzer_config.get()).ok()
     }
 
     /// Get the default analyzer configuration, if any.
@@ -119,15 +119,7 @@ impl AnalyzerConfigs {
     }
 }
 
-// impl IntoIterator for AnalyzerConfigs {
-//     type Item = (String, (Arc<Embedder>, Arc<Prompt>));
-//
-//     type IntoIter = std::collections::hash_map::IntoIter<String, (Arc<Embedder>, Arc<Prompt>)>;
-//
-//     fn into_iter(self) -> Self::IntoIter {
-//         self.0.into_iter()
-//     }
-// }
+
 
 impl Default for AnalyzerConfig {
     fn default() -> Self {

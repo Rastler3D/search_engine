@@ -136,8 +136,7 @@ impl ScoreWithRatioResult {
 
 impl<'a> Search<'a> {
     pub fn execute_hybrid(&self, semantic_ratio: f32) -> Result<(SearchResult, Option<u32>)> {
-        // TODO: find classier way to achieve that than to reset vector and query params
-        // create separate keyword and semantic searches
+
         let mut search = Search {
             query: self.query.clone(),
             filter: self.filter.clone(),

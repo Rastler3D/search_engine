@@ -13,9 +13,9 @@ use crate::{CriterionError,  UserError};
 /// You must always cast it to a sort error or a criterion error.
 #[derive(Error, Debug)]
 pub enum AscDescError {
-    #[error("Invalid syntax for the asc/desc parameter: expected expression ending by `:asc` or `:desc`, found `{name}`.")]
+    #[error("Неверный синтаксис для параметра asc/desc: ожидалось выражение, заканчивающееся на `:asc` или `:desc`, найдено `{name}`.")]
     InvalidSyntax { name: String },
-    #[error("`{name}` is a reserved keyword and thus can't be used as a asc/desc rule.")]
+    #[error("`{name}` является зарезервированным ключевым словом и поэтому не может быть использовано в качестве правила asc/desc.")]
     ReservedKeyword { name: String },
 }
 
@@ -92,9 +92,9 @@ impl FromStr for AscDesc {
 
 #[derive(Error, Debug)]
 pub enum SortError {
-    #[error("Invalid syntax for the sort parameter: expected expression ending by `:asc` or `:desc`, found `{name}`.")]
+    #[error("Неверный синтаксис для параметра sort: ожидалось выражение, заканчивающееся на `:asc` или `:desc`, найдено `{name}`.")]
     InvalidName { name: String },
-    #[error("`{name}` is a reserved keyword and thus can't be used as a sort expression.")]
+    #[error("`{name}` является зарезервированным ключевым словом и поэтому не может быть использовано в качестве выражения сортировки.")]
     ReservedName { name: String },
 }
 

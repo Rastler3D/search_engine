@@ -15,7 +15,7 @@ use crate::update::thread_pool_no_abort::PanicCatched;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("internal: {0}.")]
+    #[error("внутренняя: {0}.")]
     InternalError(#[from] InternalError),
     #[error(transparent)]
     IoError(#[from] io::Error),
@@ -27,21 +27,21 @@ pub enum Error {
 pub enum InternalError {
     #[error("{}", HeedError::DatabaseClosing)]
     DatabaseClosing,
-    #[error("Missing {} in the {db_name} database.", key.unwrap_or("key"))]
+    #[error("Отсутствует {} в базе данных {db_name}.", key.unwrap_or("key"))]
     DatabaseMissingEntry { db_name: &'static str, key: Option<&'static str> },
     #[error(transparent)]
     FieldIdMapMissingEntry(#[from] FieldIdMapMissingEntry),
-    #[error("Missing {key} in the field id mapping.")]
+    #[error("Отсутствует {key} для сопоставлении id поля.")]
     FieldIdMappingMissingEntry { key: FieldId },
     #[error(transparent)]
     Fst(#[from] fst::Error),
     #[error(transparent)]
     DocumentsError(#[from] documents::Error),
-    #[error("Invalid compression type have been specified to grenad.")]
+    #[error("Для grenad был указан неверный тип сжатия.")]
     GrenadInvalidCompressionType,
-    #[error("Invalid grenad file with an invalid version format.")]
+    #[error("Неверный файл grenad.")]
     GrenadInvalidFormatVersion,
-    #[error("Invalid merge while processing {process}.")]
+    #[error("Неверное слияние при обработке {process}.")]
     IndexingMergingKeys { process: &'static str },
     #[error("{}", HeedError::InvalidDatabaseTyping)]
     InvalidDatabaseTyping,
@@ -57,9 +57,9 @@ pub enum InternalError {
     Store(#[from] MdbError),
     #[error(transparent)]
     Utf8(#[from] str::Utf8Error),
-    #[error("An indexation process was explicitly aborted.")]
+    #[error("Процесс индексации был прерван.")]
     AbortedIndexation,
-    #[error("The matching words list contains at least one invalid member.")]
+    #[error("Список подходящих слов содержит по крайней мере один недопустимый член.")]
     InvalidMatchingWords,
     #[error(transparent)]
     ArroyError(#[from] arroy::Error),
@@ -70,73 +70,70 @@ pub enum InternalError {
 #[derive(Error, Debug)]
 pub enum SerializationError {
     #[error("{}", match .db_name {
-        Some(name) => format!("decoding from the {name} database failed"),
+        Some(name) => format!("Декодирование из базы данных {name} не удалось"),
         None => "decoding failed".to_string(),
     })]
     Decoding { db_name: Option<&'static str> },
     #[error("{}", match .db_name {
-        Some(name) => format!("encoding into the {name} database failed"),
+        Some(name) => format!("Кодирование в базу данных {name} не удалось"),
         None => "encoding failed".to_string(),
     })]
     Encoding { db_name: Option<&'static str> },
-    #[error("number is not a valid finite number")]
+    #[error("число не является конечным")]
     InvalidNumberSerialization,
 }
 
 #[derive(Error, Debug)]
 pub enum FieldIdMapMissingEntry {
-    #[error("unknown field id {field_id} coming from the {process} process")]
+    #[error("неизвестное id поля {field_id} из процесса {process}")]
     FieldId { field_id: FieldId, process: &'static str },
-    #[error("unknown field name {field_name} coming from the {process} process")]
+    #[error("неизвестное имя поля {field_name} из процесса {process}")]
     FieldName { field_name: String, process: &'static str },
 }
 
 #[derive(Error, Debug)]
 pub enum UserError {
-    #[error("A document cannot contain more than 65,535 fields.")]
+    #[error("Документ не может содержать более 65 535 полей.")]
     AttributeLimitReached,
     #[error(transparent)]
     CriterionError(#[from] CriterionError),
-    #[error("Maximum number of documents reached.")]
+    #[error("Достигнуто максимальное количество документов.")]
     DocumentLimitReached,
-    #[error(
-        "Document identifier `{}` is invalid. \
-A document identifier can be of type integer or string, \
-only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and underscores (_).", .document_id.to_string()
+    #[error("Идентификатор документа `{}` недействителен. Идентификатор документа должен быть либо целым числом, либо строкой", .document_id.to_string()
     )]
     InvalidDocumentId { document_id: Value },
-    #[error("Invalid facet distribution, {}", format_invalid_filter_distribution(.invalid_facets_name, .valid_facets_name))]
+    #[error("Неверное распределение фасетов, {}", format_invalid_filter_distribution(.invalid_facets_name, .valid_facets_name))]
     InvalidFacetsDistribution {
         invalid_facets_name: BTreeSet<String>,
         valid_facets_name: BTreeSet<String>,
     },
     #[error(transparent)]
     InvalidGeoField(#[from] GeoError),
-    #[error("Invalid vector dimensions: expected: `{}`, found: `{}`.", .expected, .found)]
+    #[error("Недопустимые размеры вектора: ожидается: `{}`, найдено: `{}`.", .expected, .found)]
     InvalidVectorDimensions { expected: usize, found: usize },
-    #[error("The `_vectors.{subfield}` field in the document with id: `{document_id}` is not an array. Was expecting an array of floats or an array of arrays of floats but instead got `{value}`.")]
+    #[error("Поле `_vectors.{subfield}` в документе: `{document_id}` не является массивом. Ожидался массив значений с плавающей точкой или массив массивов значений с плавающей точкойй, но было получено `{value}`.")]
     InvalidVectorsType { document_id: Value, value: Value, subfield: String },
-    #[error("The `_vectors` field in the document with id: `{document_id}` is not an object. Was expecting an object with a key for each embedder with manually provided vectors, but instead got `{value}`")]
+    #[error("Поле `_vectors` в документе: `{document_id}` не является объектом. Ожидался объект с ключом для каждого эмбеддера с предоставленными вручную векторами, но вместо этого было получено `{value}`")]
     InvalidVectorsMapType { document_id: Value, value: Value },
     #[error("{0}")]
     InvalidFilter(String),
-    #[error("Invalid type for filter subexpression: expected: {}, found: {1}.", .0.join(", "))]
+    #[error("Неверный тип для фильтра: ожидается: {}, найдено: {1}.", .0.join(", "))]
     InvalidFilterExpression(&'static [&'static str], Value),
-    #[error("Attribute `{}` is not sortable. {}",
+    #[error("Аттрибут `{}` не сортируемый. {}",
         .field,
         match .valid_fields.is_empty() {
-            true => "This index does not have configured sortable attributes.".to_string(),
-            false => format!("Available sortable attributes are: `{}`.",
+            true => "Этот индекс не имеет настроенных сортируемых атрибутов.".to_string(),
+            false => format!("Доступны следующие сортируемые атрибуты: `{}`.",
                     valid_fields.iter().map(AsRef::as_ref).collect::<Vec<&str>>().join(", "),
                 ),
         }
     )]
     InvalidSortableAttribute { field: String, valid_fields: BTreeSet<String>},
-    #[error("Attribute `{}` is not facet-searchable. {}",
+    #[error("Атрибут `{}` не поддается фасетному поиску. {}",
         .field,
         match .valid_fields.is_empty() {
-            true => "This index does not have configured facet-searchable attributes. To make it facet-searchable add it to the `filterableAttributes` index settings.".to_string(),
-            false => format!("Available facet-searchable attributes are: `{}`. To make it facet-searchable add it to the `filterableAttributes` index settings.",
+            true => "Этот индекс не имеет настроенных атрибутов для фасетного поиска. Чтобы сделать его пригодным для поиска по фасетам, добавьте его в настройки индекса `filterableAttributes`.".to_string(),
+            false => format!("Доступны следующие атрибуты для поиска по фасетам: `{}`. Чтобы сделать его пригодным для поиска по фасетам, добавьте его в настройки индекса `filterableAttributes`.",
                     valid_fields.iter().map(AsRef::as_ref).collect::<Vec<&str>>().join(", "),
                 ),
         }
@@ -145,7 +142,7 @@ only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and undersco
         field: String,
         valid_fields: BTreeSet<String>,
     },
-    #[error("Attribute `{}` is not searchable. Available searchable attributes are: `{}`.",
+    #[error("Атрибуй `{}` не является доступным для поиска. Доступными для поиска атрибутами являются: `{}`.",
         .field,
         .valid_fields.iter().map(AsRef::as_ref).collect::<Vec<&str>>().join(", "),
     )]
@@ -153,33 +150,33 @@ only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and undersco
         field: String,
         valid_fields: BTreeSet<String>,
     },
-    #[error("an environment is already opened with different options")]
+    #[error("Уже открыта среда с другими опциями")]
     InvalidLmdbOpenOptions,
-    #[error("You must specify where `sort` is listed in the rankingRules setting to use the sort parameter at search time.")]
+    #[error("Чтобы использовать параметр сортировки во время поиска, необходимо указать критерий `sort` в настройке rankingRules.")]
     SortRankingRuleMissing,
-    #[error("The database file is in an invalid state.")]
+    #[error("Файл базы данных находится в некорректном состоянии.")]
     InvalidStoreFile,
-    #[error("Maximum database size has been reached.")]
+    #[error("Достигнут максимальный размер базы данных.")]
     MaxDatabaseSizeReached,
-    #[error("Document doesn't have a `{}` attribute: `{}`.", .primary_key, serde_json::to_string(.document).unwrap())]
+    #[error("Документ не имеет атрибута `{}`: `{}`.", .primary_key, serde_json::to_string(.document).unwrap())]
     MissingDocumentId { primary_key: String, document: Object },
-    #[error("Document have too many matching `{}` attribute: `{}`.", .primary_key, serde_json::to_string(.document).unwrap())]
+    #[error("В документе несколько атрибутов `{}`: `{}`.", .primary_key, serde_json::to_string(.document).unwrap())]
     TooManyDocumentIds { primary_key: String, document: Object },
-    #[error("The primary key inference failed as the engine did not find any field ending with `id` in its name. Please specify the primary key manually using the `primaryKey` query parameter.")]
+    #[error("Вывод первичного ключа не удался, поскольку не было найдено ни одного поля, в названии которого содержалось бы `id`. Пожалуйста, укажите первичный ключ вручную с помощью параметра запроса `primaryKey`.")]
     NoPrimaryKeyCandidateFound,
-    #[error("The primary key inference failed as the engine found {} fields ending with `id` in their names: '{}' and '{}'. Please specify the primary key manually using the `primaryKey` query parameter.", .candidates.len(), .candidates.first().unwrap(), .candidates.get(1).unwrap())]
+    #[error("Вывод первичного ключа не удался, так как было обнаружено {} поля, имена которых заканчиваются на `id`: '{}' и '{}'. Пожалуйста, укажите первичный ключ вручную с помощью параметра запроса `primaryKey`.", .candidates.len(), .candidates.first().unwrap(), .candidates.get(1).unwrap())]
     MultiplePrimaryKeyCandidatesFound { candidates: Vec<String> },
-    #[error("There is no more space left on the device. Consider increasing the size of the disk/partition.")]
+    #[error("На устройстве не осталось свободного места.")]
     NoSpaceLeftOnDevice,
-    #[error("Index already has a primary key: `{0}`.")]
+    #[error("Индекс уже имеет первичный ключ: `{0}`.")]
     PrimaryKeyCannotBeChanged(String),
     #[error(transparent)]
     SerdeJson(serde_json::Error),
     #[error(transparent)]
     SortError(#[from] SortError),
-    #[error("An unknown internal document id have been used: `{document_id}`.")]
+    #[error("Был использован неизвестный идентификатор документа: `{document_id}`.")]
     UnknownInternalDocumentId { document_id: DocumentId },
-    #[error("`minWordSizeForTypos` setting is invalid. `oneTypo` and `twoTypos` fields should be between `0` and `255`, and `twoTypos` should be greater or equals to `oneTypo` but found `oneTypo: {0}` and twoTypos: {1}`.")]
+    #[error("Настройка `typoTolerance` недействительна. `twoTypos` должны быть больше или равны `oneTypo`.")]
     InvalidMinTypoWordLenSetting(u8, u8),
     #[error(transparent)]
     VectorEmbeddingError(#[from] crate::vector::Error),
@@ -187,19 +184,19 @@ only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and undersco
     MissingDocumentField(#[from] crate::prompt::error::RenderPromptError),
     #[error(transparent)]
     InvalidPrompt(#[from] crate::prompt::error::NewPromptError),
-    #[error("`.embedders.{0}.documentTemplate`: Invalid template: {1}.")]
+    #[error("`.embedders.{0}.documentTemplate`: Некорректный шаблон: {1}.")]
     InvalidPromptForEmbeddings(String, crate::prompt::error::NewPromptError),
-    #[error("Too many embedders in the configuration. Found {0}, but limited to 256.")]
+    #[error("Слишком много генераторов векторных встраиваний. Найдено {0}, но ограничено 256.")]
     TooManyEmbedders(usize),
-    #[error("Cannot find embedder with name `{0}`.")]
+    #[error("Не найдет генератор векторных встраиваний с именем `{0}`.")]
     InvalidEmbedder(String),
-    #[error("Cannot find analyzer with name `{0}`.")]
+    #[error("Не найдет текстовый анализатор с именем `{0}`.")]
     InvalidAnalyzer(String),
-    #[error("Cannot find default analyzer.")]
+    #[error("Отсутствует текстовый анализатор по умолчанию.")]
     NoDefaultAnalyzer,
-    #[error("Too many vectors for document with id {0}: found {1}, but limited to 256.")]
+    #[error("Слишком много векторов для документа с идентификатором {0}: найдено {1}, но ограничено 256.")]
     TooManyVectors(String, usize),
-    #[error("`.embedders.{embedder_name}`: Field `{field}` unavailable for source `{source_}` (only available for sources: {}). Available fields: {}",
+    #[error("`.embedders.{embedder_name}`: Поле `{field}` недоступно для источника `{source_}` (Доступны для источника: {}). Доступные поля: {}",
         allowed_sources_for_field
          .iter()
          .map(|accepted| format!("`{}`", accepted))
@@ -218,31 +215,31 @@ only composed of alphanumeric characters (a-z A-Z 0-9), hyphens (-) and undersco
         allowed_fields_for_source: &'static [&'static str],
         allowed_sources_for_field: &'static [crate::vector::settings::EmbedderSource],
     },
-    #[error("`.embedders.{embedder_name}.model`: Invalid model `{model}` for OpenAI. Supported models: {:?}", crate::vector::openai::EmbeddingModel::supported_models())]
+    #[error("`.embedders.{embedder_name}.model`: Недопустимая модель `{model}` для OpenAI. Поддерживаемые модели: {:?}", crate::vector::openai::EmbeddingModel::supported_models())]
     InvalidOpenAiModel { embedder_name: String, model: String },
-    #[error("`.embedders.{embedder_name}`: Missing field `{field}` (note: this field is mandatory for source {source_})")]
+    #[error("`.embedders.{embedder_name}`: Отсутствует поле `{field}` (Это поле обязательно для источника {source_})")]
     MissingFieldForSource {
         field: &'static str,
         source_: crate::vector::settings::EmbedderSource,
         embedder_name: String,
     },
-    #[error("`.embedders.{embedder_name}.dimensions`: Model `{model}` does not support overriding its native dimensions of {expected_dimensions}. Found {dimensions}")]
+    #[error("`.embedders.{embedder_name}.dimensions`: Модель `{model}` не поддерживает переопределение размеров {expected_dimensions}. Найдено {dimensions}")]
     InvalidOpenAiModelDimensions {
         embedder_name: String,
         model: &'static str,
         dimensions: usize,
         expected_dimensions: usize,
     },
-    #[error("`.embedders.{embedder_name}.dimensions`: Model `{model}` does not support overriding its dimensions to a value higher than {max_dimensions}. Found {dimensions}")]
+    #[error("`.embedders.{embedder_name}.dimensions`: Модель `{model}` не поддерживает переопределение размеров на значение, превышающее {max_dimensions}. Найдено {dimensions}")]
     InvalidOpenAiModelDimensionsMax {
         embedder_name: String,
         model: &'static str,
         dimensions: usize,
         max_dimensions: usize,
     },
-    #[error("`.embedders.{embedder_name}.dimensions`: `dimensions` cannot be zero")]
+    #[error("`.embedders.{embedder_name}.dimensions`: не может быть нулевым")]
     InvalidSettingsDimensions { embedder_name: String },
-    #[error("`.embedders.{embedder_name}.url`: could not parse `{url}`: {inner_error}")]
+    #[error("`.embedders.{embedder_name}.url`: Невозможно разобрать `{url}`: {inner_error}")]
     InvalidUrl { embedder_name: String, inner_error: url::ParseError, url: String },
 }
 
@@ -301,7 +298,7 @@ fn format_invalid_filter_distribution(
     valid_facets_name: &BTreeSet<String>,
 ) -> String {
     if valid_facets_name.is_empty() {
-        return "this index does not have configured filterable attributes.".into();
+        return "этот индекс не имеет настроенных фильтруемых атрибутов.".into();
     }
 
     let mut result = String::new();
@@ -310,13 +307,13 @@ fn format_invalid_filter_distribution(
         0 => (),
         1 => write!(
             result,
-            "attribute `{}` is not filterable.",
+            "атрибут `{}` не настроен для фильтрации.",
             invalid_facets_name.first().unwrap()
         )
         .unwrap(),
         _ => write!(
             result,
-            "attributes `{}` are not filterable.",
+            " атрибуты `{}` не настроен для фильтрации.",
             invalid_facets_name.iter().map(AsRef::as_ref).collect::<Vec<&str>>().join(", ")
         )
         .unwrap(),
@@ -325,13 +322,13 @@ fn format_invalid_filter_distribution(
     match valid_facets_name.len() {
         1 => write!(
             result,
-            " The available filterable attribute is `{}`.",
+            " Атрибут, настроеные для фильтрации `{}`.",
             valid_facets_name.first().unwrap()
         )
         .unwrap(),
         _ => write!(
             result,
-            " The available filterable attributes are `{}`.",
+            " Атрибуты, настроеные для фильтрации `{}`.",
             valid_facets_name.iter().map(AsRef::as_ref).collect::<Vec<&str>>().join(", ")
         )
         .unwrap(),

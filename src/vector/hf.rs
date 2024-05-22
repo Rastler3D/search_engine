@@ -1,7 +1,6 @@
 use candle_core::Tensor;
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
-// FIXME: currently we'll be using the hub to retrieve model, in the future we might want to embed it into Meilisearch itself
 use hf_hub::api::sync::Api;
 use hf_hub::{Repo, RepoType};
 use tokenizers::{PaddingParams, Tokenizer};

@@ -106,6 +106,7 @@ pub fn execute_vector_search(
     embedder: &Embedder,
 ) -> Result<PartialSearchResult> {
     check_sort_criteria(ctx, sort_criteria.as_ref())?;
+
     let placeholder_graph = QueryGraph::placeholder(ctx)?;
     let ranking_rules = get_ranking_rules_for_vector(
         ctx,
@@ -120,8 +121,8 @@ pub fn execute_vector_search(
     let BucketSortOutput { docids, scores, candidates} = bucket_sort(
         ctx,
         ranking_rules,
-        skip,
         limit,
+        skip,
         candidates,
     )?;
 

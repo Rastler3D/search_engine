@@ -78,7 +78,6 @@ pub fn recursive_sort(mut current_rule: usize, ctx: &mut dyn Context, mut score:
             recursive_sort(current_rule + 1, ctx, score, ranking_rule, limit, skip, output,visited)?;
         }
     }
-
     score.pop();
 
     Ok(())

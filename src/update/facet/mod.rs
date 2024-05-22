@@ -1,76 +1,3 @@
-/*!
-This module implements two different algorithms for updating the `facet_id_string_docids`
-and `facet_id_f64_docids` databases. The first algorithm is a "bulk" algorithm, meaning that
-it recreates the database from scratch when new elements are added to it. The second algorithm
-is incremental: it modifies the database as little as possible.
-
-The databases must be able to return results for queries such as:
-1. Filter       : find all the document ids that have a facet value greater than X and/or smaller than Y
-2. Min/Max      : find the minimum/maximum facet value among these document ids
-3. Sort         : sort these document ids by increasing/decreasing facet values
-4. Distribution : given some document ids, make a list of each facet value
-   found in these documents along with the number of documents that contain it
-
-The algorithms that implement these queries are found in the `src/search/facet` folder.
-
-To make these queries fast to compute, the database adopts a tree structure:
-```text
-            ┌───────────────────────────────┬───────────────────────────────┬───────────────┐
-┌───────┐   │           "ab" (2)            │           "gaf" (2)           │   "woz" (1)   │
-│Level 2│   │                               │                               │               │
-└───────┘   │        [a, b, d, f, z]        │        [c, d, e, f, g]        │    [u, y]     │
-            ├───────────────┬───────────────┼───────────────┬───────────────┼───────────────┤
-┌───────┐   │   "ab" (2)    │   "ba" (2)    │   "gaf" (2)   │  "form" (2)   │   "woz" (2)   │
-│Level 1│   │               │               │               │               │               │
-└───────┘   │ [a, b, d, z]  │   [a, b, f]   │   [c, d, g]   │    [e, f]     │    [u, y]     │
-            ├───────┬───────┼───────┬───────┼───────┬───────┼───────┬───────┼───────┬───────┤
-┌───────┐   │  "ab" │  "ac" │  "ba" │ "bac" │ "gaf" │ "gal" │ "form"│ "wow" │ "woz" │  "zz" │
-│Level 0│   │       │       │       │       │       │       │       │       │       │       │
-└───────┘   │ [a, b]│ [d, z]│ [b, f]│ [a, f]│ [c, d]│  [g]  │  [e]  │ [e, f]│  [y]  │  [u]  │
-            └───────┴───────┴───────┴───────┴───────┴───────┴───────┴───────┴───────┴───────┘
-```
-In the diagram above, each cell corresponds to a node in the tree. The first line of the cell
-contains the left bound of the range of facet values as well as the number of children of the node.
-The second line contains the document ids which have a facet value within the range of the node.
-The nodes at level 0 are the leaf nodes. They have 0 children and a single facet value in their range.
-
-In the diagram above, the first cell of level 2 is `ab (2)`. Its range is `ab .. gaf` (because
-`gaf` is the left bound of the next node) and it has two children. Its document ids are `[a,b,d,f,z]`.
-These documents all contain a facet value that is contained within `ab .. gaf`.
-
-In the database, each node is represented by a key/value pair encoded as a [`FacetGroupKey`] and a
-[`FacetGroupValue`], which have the following format:
-
-```text
-FacetGroupKey:
-- field id  : u16
-- level     : u8
-- left bound: [u8]    // the facet value encoded using either OrderedF64Codec or Str
-
-FacetGroupValue:
-- #children : u8
-- docids    : RoaringBitmap
-```
-
-When the database is first created using the "bulk" method, each node has a fixed number of children
-(except for possibly the last one) given by the `group_size` parameter (default to `FACET_GROUP_SIZE`).
-The tree is also built such that the highest level has more than `min_level_size`
-(default to `FACET_MIN_LEVEL_SIZE`) elements in it.
-
-When the database is incrementally updated, the number of children of a node can vary between
-1 and `max_group_size`. This is done so that most incremental operations do not need to change
-the structure of the tree. When the number of children of a node reaches `max_group_size`,
-we split the node in two and update the number of children of its parent.
-
-When adding documents to the databases, it is important to determine which method to use to
-minimise indexing time. The incremental method is faster when adding few new facet values, but the
-bulk method is faster when a large part of the database is modified. Empirically, it seems that
-it takes 50x more time to incrementally add N facet values to an existing database than it is to
-construct a database of N facet values. This is the heuristic that is used to choose between the
-two methods.
-
-Related PR: https://github.com/meilisearch/milli/pull/619
-*/
 
 pub const FACET_MAX_GROUP_SIZE: u8 = 8;
 pub const FACET_GROUP_SIZE: u8 = 4;
@@ -97,10 +24,7 @@ use crate::{try_split_array_at, FieldId, Index, Result};
 pub mod bulk;
 pub mod incremental;
 
-/// A builder used to add new elements to the `facet_id_string_docids` or `facet_id_f64_docids` databases.
-///
-/// Depending on the number of new elements and the existing size of the database, we use either
-/// a bulk update method or an incremental update method.
+
 pub struct FacetsUpdate<'i> {
     index: &'i Index,
     database: heed::Database<FacetGroupKeyCodec<BytesRefCodec>, FacetGroupValueCodec>,

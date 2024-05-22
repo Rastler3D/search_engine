@@ -1106,7 +1106,6 @@ impl Index {
         analyzer: &Option<String>
     ) -> Result<BoxAnalyzer> {
         let analyzers = self.analyzers(rtxn)?;
-        info!("{analyzers:?}");
         if let Some(analyzer_name) = analyzer{
             analyzers.get(analyzer_name).ok_or_else(|| UserError::InvalidAnalyzer(analyzer_name.clone()).into())
         } else {

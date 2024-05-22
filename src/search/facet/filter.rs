@@ -42,7 +42,7 @@ impl<'a> Display for FilterError<'a> {
                 if filterable_fields.is_empty() {
                     write!(
                         f,
-                        "Attribute `{}` is not filterable. This index does not have configured filterable attributes.",
+                        "Атрибут `{}` не является фильтруемым. У этого индекса нет настроенных фильтруемых атрибутов.",
                         attribute,
                     )
                 } else {
@@ -54,7 +54,7 @@ impl<'a> Display for FilterError<'a> {
 
                     write!(
                         f,
-                        "Attribute `{}` is not filterable. Available filterable attributes are: `{}`.",
+                        "Атрибут `{}` не является фильтруемым. Доступными фильтруемыми атрибутами являются: `{}`.",
                         attribute,
                         filterables_list,
                     )
@@ -62,7 +62,7 @@ impl<'a> Display for FilterError<'a> {
             }
             Self::TooDeep => write!(
                 f,
-                "Too many filter conditions, can't process more than {} filters.",
+                "Слишком много условий фильтрации, невозможно обработать более {} фильтров.",
                 MAX_FILTER_DEPTH
             ),
         }
