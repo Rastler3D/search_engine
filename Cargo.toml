@@ -92,3 +92,7 @@ rand = { version = "0.8.5", features = ["small_rng"] }
 
 [patch.crates-io]
 stable_deref_trait = { path = "../analyzer/stable_deref_trait-1.2.0"  }
+
+[features]
+default = ["cuda"]
+cuda = ["candle-core/cuda"]

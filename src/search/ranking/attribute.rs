@@ -12,6 +12,7 @@ use crate::search::utils::bit_set::BitSet;
 use crate::{FieldId, Result};
 use crate::score_details::{Attribute, ScoreDetails};
 use crate::search::ranking::attribute_cost::{MAX_ATTRIBUTE, paths_cost};
+use crate::search::ranking::dead_ends_cache::DeadEndsCache;
 use crate::search::utils::vec_map::VecMap;
 
 pub struct AttributeRule<'graph> {
@@ -27,7 +28,7 @@ impl<'graph> AttributeRule<'graph> {
     pub fn new(context: &mut impl Context, graph: &'graph QueryGraph) -> Result<Self>{
         let costs = paths_cost(graph, context)?;
         let max_cost = Self::max_cost(context, graph)?;
-        let path_visitor = PathVisitor::new(graph, costs, None);
+        let path_visitor = PathVisitor::new(graph, costs, None, DeadEndsCache::new(100));
         let cost_field_id_mapping = if let Some(searchable_field) = context.searchable_fields_ids()?{
             (0..).zip(searchable_field).collect::<VecMap<_>>()
         } else {
@@ -68,7 +69,7 @@ impl<'graph> RankingRule for AttributeRule<'graph> {
             let mut bucket = RoaringBitmap::new();
             let query_graph = self.path_visitor.query_graph();
             let mut time = Instant::now();
-            self.path_visitor.visit_paths(cost, |path|{
+            self.path_visitor.visit_paths(cost, |path, dead_ends_cache|{
                 println!("Path found {:?}", time.elapsed());
                 if self.candidates.is_empty() {
                     return Ok(ControlFlow::Break(()));
@@ -92,6 +93,7 @@ impl<'graph> RankingRule for AttributeRule<'graph> {
                         ctx,
                         &query_graph,
                         &self.candidates,
+                        dead_ends_cache,
                         &mut self.edge_docids,
                         &mut subpaths_docids,
                         &self.cost_field_id_mapping,
@@ -103,7 +105,11 @@ impl<'graph> RankingRule for AttributeRule<'graph> {
                 }
 
                 let path_docids =
-                    subpaths_docids.pop().map(|x| x.1).unwrap_or_else(|| self.candidates.clone());
+                    subpaths_docids.pop().map(|x| x.1).unwrap_or_else(|| self.candidates.clone()) & &self.candidates;
+
+                if path_docids.is_empty(){
+                    return Ok(ControlFlow::Continue(()));
+                }
 
                 let mut path_bitset = BitSet::new();
                 for edge in path{
@@ -115,9 +121,9 @@ impl<'graph> RankingRule for AttributeRule<'graph> {
                 bucket |= &path_docids;
 
                 self.candidates -= &path_docids;
-                for (_, docids) in subpaths_docids.iter_mut() {
-                    *docids -= &path_docids;
-                }
+                // for (_, docids) in subpaths_docids.iter_mut() {
+                //     *docids -= &path_docids;
+                // }
 
                 if self.candidates.is_empty() {
                     time = Instant::now();
@@ -148,6 +154,7 @@ fn visit_path_edge(
     ctx: &mut (impl Context + ?Sized),
     graph: &QueryGraph,
     candidates: &RoaringBitmap,
+    dead_ends_cache: &mut DeadEndsCache,
     edge_docids: &mut HashMap<Edge, RoaringBitmap>,
     subpath: &mut Vec<(Edge, RoaringBitmap)>,
     mapping: &VecMap<Fid>,
@@ -155,18 +162,37 @@ fn visit_path_edge(
 ) -> Result<bool> {
     let edge_docids = get_edge_docids(edge_docids, ctx, latest_edge, graph, mapping)?;
     if edge_docids.is_empty() {
+        //dead_ends_cache.forbid_condition(latest_edge);
         return Ok(false);
     }
 
-    let latest_path_docids = if let Some((_, prev_docids)) = subpath.last() {
+    let mut latest_path_docids = if let Some((_, prev_docids)) = subpath.last() {
         prev_docids & edge_docids
     } else {
-        candidates & edge_docids
+        edge_docids.clone()
     };
     if !latest_path_docids.is_empty() {
         subpath.push((latest_edge, latest_path_docids));
         return Ok(true);
     }
+
+    //dead_ends_cache.forbid_condition_after_prefix(subpath.iter().map(|x| x.0), latest_edge);
+    if subpath.len() <= 1 {
+        return Ok(false);
+    }
+
+    //let mut subprefix = vec![];
+    // Deadend if the intersection between this edge and any
+    // previous prefix is disjoint with the universe
+    // We already know that the intersection with the last one
+    // is empty,
+    // for (past_condition, sp_docids) in subpath[..subpath.len() - 1].iter() {
+    //     subprefix.push(*past_condition);
+    //     if edge_docids.is_disjoint(sp_docids) {
+    //         dead_ends_cache
+    //             .forbid_condition_after_prefix(subprefix.iter().copied(), latest_edge);
+    //     }
+    // }
 
     Ok(false)
 }
@@ -205,6 +231,7 @@ pub fn get_edge_docids<'s>(
 
 struct AttributeCost;
 impl EdgeToCost for AttributeCost {
+    #[inline(always)]
     fn to_cost(edge: usize, node_id: usize, graph: &QueryGraph) -> usize {
         match &graph.nodes[node_id].data{
             NodeData::Start | NodeData::End => edge,

@@ -432,7 +432,7 @@ impl DistributionShift {
     }
 }
 
-/// Whether CUDA is supported in this version of Meilisearch.
+/// Whether CUDA is supported in this version of SearchSystem.
 pub const fn is_cuda_enabled() -> bool {
     cfg!(feature = "cuda")
 }

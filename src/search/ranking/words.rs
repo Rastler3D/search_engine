@@ -8,7 +8,7 @@ use crate::search::ranking::ranking_rule::{RankingRule, RankingRuleOutput};
 use crate::search::utils::bit_set::BitSet;
 use crate::search::utils::vec_map::VecMap;
 use crate::Result;
-use crate::score_details::{ExactWords, ScoreDetails, Words};
+use crate::score_details::{ScoreDetails, Words};
 use crate::search::query_parser::{ Term};
 
 pub struct WordsRule<'graph>{

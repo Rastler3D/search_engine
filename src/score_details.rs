@@ -181,11 +181,11 @@ pub struct Words {
 
 impl Words {
     pub fn rank(&self) -> Rank {
-        Rank { rank: self.matching_words, max_rank: self.max_matching_words }
+        Rank { rank: self.matching_words + 1, max_rank: self.max_matching_words + 1 }
     }
 
     pub(crate) fn from_rank(rank: Rank) -> Self {
-        Self { matching_words: rank.rank, max_matching_words: rank.max_rank }
+        Self { matching_words: rank.rank.saturating_sub(1), max_matching_words: rank.max_rank.saturating_sub(1)}
     }
 }
 
