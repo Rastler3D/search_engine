@@ -52,11 +52,9 @@ impl<'graph> RankingRule for ProximityRule<'graph> {
             let query_graph = self.path_visitor.query_graph();
             let mut time = Instant::now();
             self.path_visitor.visit_paths(cost, |path, dead_ends_cache|{
-                println!("Path found {:?}", time.elapsed());
                 let mut time2 = Instant::now();
                 if self.candidates.is_empty() {
                     time = Instant::now();
-                    println!("Exit0");
                     return Ok(ControlFlow::Break(()));
                 }
 
@@ -84,7 +82,6 @@ impl<'graph> RankingRule for ProximityRule<'graph> {
                         latest_edge,
                     )?;
                     if !success {
-                        println!("Early exit {:?}", time.elapsed());
                         time = Instant::now();
                         return Ok(ControlFlow::Continue(()));
                     }
@@ -94,7 +91,6 @@ impl<'graph> RankingRule for ProximityRule<'graph> {
                     subpaths_docids.pop().map(|x| x.1).unwrap_or_else(|| self.candidates.clone()) & &self.candidates;
 
                 if path_docids.is_empty(){
-                    println!("Exit1");
                     return Ok(ControlFlow::Continue(()));
                 }
 
@@ -112,7 +108,6 @@ impl<'graph> RankingRule for ProximityRule<'graph> {
                 //     *docids -= &path_docids;
                 // }
 
-                println!("Exit {:?}", time.elapsed());
                 if self.candidates.is_empty() {
                     time = Instant::now();
                     Ok(ControlFlow::Break(()))
@@ -163,23 +158,24 @@ fn visit_path_edge(
         return Ok(true);
     }
 
-    //dead_ends_cache.forbid_condition_after_prefix(subpath.iter().map(|x| x.0), latest_edge);
+    dead_ends_cache.forbid_condition_after_prefix(subpath.iter().map(|x| x.0), latest_edge);
     if subpath.len() <= 1 {
         return Ok(false);
     }
 
-    //let mut subprefix = vec![];
+    let mut subprefix = vec![];
     // Deadend if the intersection between this edge and any
     // previous prefix is disjoint with the universe
     // We already know that the intersection with the last one
     // is empty,
-    // for (past_condition, sp_docids) in subpath[..subpath.len() - 1].iter() {
-    //     subprefix.push(*past_condition);
-    //     if edge_docids.is_disjoint(sp_docids) {
-    //         dead_ends_cache
-    //             .forbid_condition_after_prefix(subprefix.iter().copied(), latest_edge);
-    //     }
-    // }
+    for (past_condition, sp_docids) in subpath[..subpath.len() - 1].iter() {
+        subprefix.push(*past_condition);
+        if edge_docids.is_disjoint(sp_docids) {
+            dead_ends_cache
+                .forbid_condition_after_prefix(subprefix.iter().copied(), latest_edge);
+        }
+    }
+
 
     Ok(false)
 }

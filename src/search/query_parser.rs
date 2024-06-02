@@ -12,8 +12,8 @@ pub fn parse_query<'a>(mut token_stream: impl TokenStream<'a>) -> Vec<Term>{
     let mut negative_term = false;
 
     let mut position = usize::MAX;
-
-    while let Some(token) = token_stream.next() {
+    let mut peekable = token_stream.as_iter().take(100).peekable();
+    while let Some(token) = peekable.next() {
         if token.text.is_empty() {
             continue;
         }
@@ -30,12 +30,12 @@ pub fn parse_query<'a>(mut token_stream: impl TokenStream<'a>) -> Vec<Term>{
                 position = position.wrapping_add(1);
 
                 if let Some(phrase) = &mut phrase {
-                    phrase.push_word(token.text.to_string(), position)
+                    phrase.push_word(token.text, position)
                 } else {
-                    let term = if flags.contains(TokenFlags::Prefix){
-                        OriginalTerm::Prefix(token.text.to_string())
+                    let term = if flags.contains(TokenFlags::Prefix) || peekable.peek().is_none(){
+                        OriginalTerm::Prefix(token.text)
                     } else {
-                        OriginalTerm::Word(token.text.to_string())
+                        OriginalTerm::Word(token.text)
                     };
                     let term = Term {
                         term_kind: if flags.contains(TokenFlags::Exact) {

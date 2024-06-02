@@ -1,14 +1,9 @@
 use std::collections::HashSet;
-use std::marker::PhantomData;
 use std::ops::ControlFlow;
-use std::time::Instant;
-use roaring::MultiOps;
 use crate::proximity::MAX_DISTANCE;
 use crate::search::query_graph::{NodeData, QueryGraph};
 use crate::Result;
 use crate::search::query_parser::{Term, TermKind};
-use crate::search::ranking::dead_ends_cache::DeadEndsCache;
-use crate::search::ranking::proximity::ProximityCost;
 use crate::search::utils::bit_set::BitSet;
 use crate::search::utils::vec_map::VecMap;
 
@@ -21,9 +16,9 @@ pub struct Edge {
 
 pub type Depth = usize;
 
-struct VisitorContext<'a, T: AsRef<[BitSet]>> {
+struct VisitorContext<'a> {
     graph: &'a QueryGraph,
-    all_costs_from_node: VecMap<VecMap<T>>,
+    all_costs_from_node: VecMap<VecMap<[BitSet; MAX_DISTANCE as usize]>>,
     allowed_paths: Option<HashSet<BitSet>>,
 }
 
@@ -32,60 +27,43 @@ struct VisitorState<'a> {
     path: &'a mut Vec<Edge>,
     visited_nodes: BitSet,
     allowed_paths: Option<&'a mut Vec<BitSet>>,
-    allowed_paths_bitset: &'a mut BitSet<Vec<u64>>,
-    forbidden_conditions: &'a mut HashSet<Edge>,
-    visited_conditions: &'a mut HashSet<Edge>,
-    dead_ends_cache: &'a mut DeadEndsCache,
+    allowed_paths_bitset: BitSet,
     restricted_paths: &'a mut Vec<usize>
 }
 
-pub struct PathVisitor<'a, EC: EdgeToCost = ProximityCost, T: AsRef<[BitSet]> = [BitSet; MAX_DISTANCE as usize]> {
-    ctx: VisitorContext<'a, T>,
+pub struct PathVisitor<'a> {
+    ctx: VisitorContext<'a>,
     allowed_paths_buffer: Vec<BitSet>,
-    dead_ends_cache: DeadEndsCache,
-    allowed_paths_bitset_buffer: BitSet<Vec<u64>>,
-    forbidden_conditions: HashSet<Edge>,
-    visited_conditions: HashSet<Edge>,
     path_buffer: Vec<Edge>,
-    restricted_paths_buffer: Vec<usize>,
-    _phantom: PhantomData<EC>
+    restricted_paths_buffer: Vec<usize>
 }
-impl<'a, EC: EdgeToCost, T: AsRef<[BitSet]>> PathVisitor<'a, EC, T> {
+impl<'a> PathVisitor<'a> {
     pub fn new(
         graph: &'a QueryGraph,
-        all_costs_from_node: VecMap<VecMap<T>>,
-        allowed_paths: Option<HashSet<BitSet>>,
-        dead_ends_cache: DeadEndsCache
+        all_costs_from_node: VecMap<VecMap<[BitSet; MAX_DISTANCE as usize]>>,
+        allowed_paths: Option<HashSet<BitSet>>
     ) -> Self {
         Self{
             ctx: VisitorContext { graph, all_costs_from_node, allowed_paths },
             allowed_paths_buffer: Vec::new(),
-            allowed_paths_bitset_buffer: BitSet::new_vec(),
-            forbidden_conditions: HashSet::new(),
-            dead_ends_cache,
-            visited_conditions: HashSet::new(),
             path_buffer: Vec::new(),
             restricted_paths_buffer: Vec::new(),
-            _phantom: Default::default(),
         }
     }
-    #[inline(always)]
+
     pub fn set_allowed_paths(&mut self, allowed_paths: Option<HashSet<BitSet>>){
         self.ctx.allowed_paths = allowed_paths;
     }
-    #[inline(always)]
+
     pub fn query_graph(&mut self) -> &'a QueryGraph{
         self.ctx.graph
     }
-    #[inline(always)]
-    pub fn visit_paths(&mut self, cost: usize, mut visit: impl (FnMut(&[Edge], &mut DeadEndsCache) -> Result<ControlFlow<()>>)) -> Result<()> {
+
+    pub fn visit_paths(&mut self, cost: usize, mut visit: impl (FnMut(&[Edge]) -> Result<ControlFlow<()>>)) -> Result<()> {
         self.path_buffer.clear();
         self.restricted_paths_buffer.clear();
         self.allowed_paths_buffer.clear();
-        self.allowed_paths_bitset_buffer.clear();
-        self.forbidden_conditions.clear();
-        self.visited_conditions.clear();
-        self.allowed_paths_bitset_buffer.extend(0..self.ctx.allowed_paths.as_ref().map_or(0,|paths| paths.len()));
+
         let mut state = VisitorState {
             remaining_cost: cost,
             path: &mut self.path_buffer,
@@ -93,36 +71,28 @@ impl<'a, EC: EdgeToCost, T: AsRef<[BitSet]>> PathVisitor<'a, EC, T> {
                 self.allowed_paths_buffer.extend(paths);
                 &mut self.allowed_paths_buffer
             }),
-            allowed_paths_bitset: &mut self.allowed_paths_bitset_buffer,
-            forbidden_conditions: &mut self.forbidden_conditions,
-            visited_conditions: &mut self.visited_conditions,
-            dead_ends_cache: &mut self.dead_ends_cache,
+            allowed_paths_bitset: BitSet::<[_;2]>::init(true, self.ctx.allowed_paths.as_ref().map_or(0,|paths| paths.len())),
             restricted_paths: &mut self.restricted_paths_buffer,
             visited_nodes: BitSet::new(),
         };
-        let _ = state.visit_node::<EC>(self.ctx.graph.root, &mut visit, &mut self.ctx)?;
+        let _ = state.visit_node(self.ctx.graph.root, &mut visit, &mut self.ctx)?;
 
         Ok(())
     }
 }
 
-pub trait EdgeToCost{
-    #[inline(always)]
-    fn to_cost(edge: usize, node_id: usize, graph: &QueryGraph) -> usize;
-}
-
 impl<'a> VisitorState<'a> {
-    #[inline(always)]
-    fn visit_node<EC: EdgeToCost>(
+    fn visit_node(
         &mut self,
         from_node: usize,
-        visit: &mut impl (FnMut(&[Edge], &mut DeadEndsCache) -> Result<ControlFlow<()>>),
-        ctx: &VisitorContext<impl AsRef<[BitSet]>>,
+        visit: &mut impl (FnMut(&[Edge]) -> Result<ControlFlow<()>>),
+        ctx: &mut VisitorContext,
     ) -> Result<ControlFlow<(), bool>> {
         if from_node == ctx.graph.end {
             if let Some(allowed_paths) = &self.allowed_paths{
                 for path in self.allowed_paths_bitset.iter(){
                     let mut path = allowed_paths[path];
+                    //let mut path = *path;
                     let path = path.difference(&self.visited_nodes);
                     let is_allowed = if path.len() > 1 {
                         false
@@ -130,7 +100,7 @@ impl<'a> VisitorState<'a> {
                         path.contains(from_node)
                     };
                     if is_allowed{
-                        let control_flow = visit(self.path, self.dead_ends_cache)?;
+                        let control_flow = visit(self.path)?;
                         return match control_flow {
                             ControlFlow::Continue(_) => Ok(ControlFlow::Continue(true)),
                             ControlFlow::Break(_) => Ok(ControlFlow::Break(())),
@@ -140,7 +110,7 @@ impl<'a> VisitorState<'a> {
                 return Ok(ControlFlow::Continue(false))
             }
 
-            let control_flow = visit(self.path, self.dead_ends_cache)?;
+            let control_flow = visit(self.path)?;
             return match control_flow {
                 ControlFlow::Continue(_) => Ok(ControlFlow::Continue(true)),
                 ControlFlow::Break(_) => Ok(ControlFlow::Break(())),
@@ -159,9 +129,8 @@ impl<'a> VisitorState<'a> {
                     self.restricted_paths.push(path_idx);
                 }
             }
-            let _ = self.restricted_paths[restricted_paths_len..].iter().for_each(|&x| {
-                self.allowed_paths_bitset.remove(x);
-            });
+            let restricted = BitSet::from_iter(self.restricted_paths[restricted_paths_len..].iter().copied());
+            self.allowed_paths_bitset.difference(&restricted);
 
         }
 
@@ -173,66 +142,33 @@ impl<'a> VisitorState<'a> {
                 from_node
             };
             let costs = &ctx.all_costs_from_node[node];
-            if let Some(paths) = costs.get(self.remaining_cost) {
-                'outer: for (edge, next_nodes) in paths.as_ref().iter().enumerate() {
+            if let Some(&paths) = costs.get(self.remaining_cost) {
+                for (cost, next_nodes) in paths.iter().enumerate() {
+                    if self.remaining_cost < cost{
+                        continue
+                    }
+                    self.remaining_cost -= cost;
                     for to_node in next_nodes.iter() {
-                        let cost = EC::to_cost(edge, to_node, ctx.graph);
-                        let edge = Edge {
+                        self.path.push(Edge {
                             from: from_node,
                             to: to_node,
-                            cost: edge
-                        };
-
-                        if self.forbidden_conditions.contains(&edge)
-                        {
-                            continue;
-                        }
-
-                        if self.remaining_cost < cost{
-                            continue
-                        }
-                        self.remaining_cost -= cost;
-
-                        self.path.push(edge);
-                        self.visited_conditions.insert(edge);
-
-                        let old_forb_cond = self.forbidden_conditions.clone();
-                        if let Some(next_forbidden) =
-                            self.dead_ends_cache.forbidden_conditions_after_prefix(self.path.iter().copied())
-                        {
-                            self.forbidden_conditions.extend(next_forbidden.iter().copied());
-                        }
-
-                        let cf = self.visit_node::<EC>(to_node, visit, ctx)?;
-
-                        *self.forbidden_conditions = old_forb_cond;
-                        self.visited_conditions.remove(&edge);
+                            cost
+                        });
+                        let cf = self.visit_node(to_node, visit, ctx)?;
                         self.path.pop();
-
-                        self.remaining_cost += cost;
 
                         let ControlFlow::Continue(next_any_valid) = cf else {
                             return Ok(ControlFlow::Break(()));
                         };
                         any_valid |= next_any_valid;
-                        if next_any_valid {
-                            // backtrack as much as possible if a valid path was found and the dead_ends_cache
-                            // was updated such that the current prefix is now invalid
-                            *self.forbidden_conditions = self
-                                .dead_ends_cache
-                                .forbidden_conditions_for_all_prefixes_up_to(self.path.iter().copied());
-                            if !self.visited_conditions.is_disjoint(&self.forbidden_conditions) {
-                                break 'outer;
-                            }
-                        }
-
                     }
+                    self.remaining_cost += cost;
                 }
             }
             self.visited_nodes.remove(from_node);
         }
 
-        if let Some(_) = &mut self.allowed_paths {
+        if let Some(allowed_paths) = &mut self.allowed_paths {
             self.allowed_paths_bitset.extend(self.restricted_paths.drain(restricted_paths_len..));
         }
 
@@ -243,7 +179,6 @@ impl<'a> VisitorState<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::time::Instant;
     use crate::search::query_graph::tests::TestContext;
     use crate::search::query_parser::parse_query;
@@ -268,22 +203,15 @@ mod tests {
         println!("Graph build {:?}", elapsed);
         let time = Instant::now();
         let mut costs = paths_cost(&query_graph, &mut context).unwrap();
+        println!("{:?}", costs);
         let elapsed = time.elapsed();
         println!("Graph cost {:?}", elapsed);
-        let mut path: PathVisitor = PathVisitor::new(&mut query_graph, costs, Some(HashSet::from([BitSet::from_iter([0,1,10,11,4])])), DeadEndsCache::new(10));
+        let mut path: PathVisitor = PathVisitor::new(&mut query_graph, costs, Some(HashSet::from([BitSet::from_iter([0,8,10,11,4])])));
 
-        path.visit_paths(8, |x, dead| {
-           println!("{x:?}");
-            if x[0].to == 1{
-                dead.forbid_condition(x[0]);
-                dead.forbid_condition_after_prefix(x.iter().copied(), x[0]);
-            }
-            Ok(ControlFlow::Continue(()))
-        }).unwrap();
-        path.set_allowed_paths(Some(HashSet::from([BitSet::from_iter([0,8,10,4])])));
         let time = Instant::now();
-        path.visit_paths(4, |x, dead| {
+        path.visit_paths(8, |x| {
             println!("{x:?}");
+
             Ok(ControlFlow::Continue(()))
         }).unwrap();
         let elapsed = time.elapsed();
@@ -291,4 +219,3 @@ mod tests {
 
     }
 }
-
